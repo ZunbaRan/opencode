@@ -8,6 +8,7 @@ import type { FormField, FormValue } from "@opencode-ai/client"
 import type { FormWithLocation } from "../../context/data"
 import { useClient } from "../../context/client"
 import { useClipboard } from "../../context/clipboard"
+import { formatClipboardWriteNotification } from "../../clipboard"
 import { SplitBorder } from "../../ui/border"
 import { useToast } from "../../ui/toast"
 import { Keymap } from "../../context/keymap"
@@ -362,12 +363,14 @@ export function FormPrompt(props: { form: FormWithLocation }) {
 
   function copyExternal() {
     const current = externalField()
-    if (!current || !clipboard.write) return
+    if (!current) return
     void clipboard
       .write(current.url)
-      .then(() => {
+      .then((outcome) => {
         setStore("externalReady", { ...store.externalReady, [current.key]: true })
-        toast.show({ message: "Copied URL to clipboard", variant: "info" })
+        toast.show(
+          formatClipboardWriteNotification(outcome, { message: "Copied URL to clipboard", variant: "info" }),
+        )
       })
       .catch(toast.error)
   }
@@ -998,7 +1001,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
           >
             enter <span style={{ fg: themeV2.text.subdued }}>{actionLabel()}</span>
           </text>
-          <Show when={externalField() && clipboard.write}>
+          <Show when={externalField()}>
             <text fg={themeV2.text.default} onMouseUp={copyExternal}>
               c <span style={{ fg: themeV2.text.subdued }}>copy</span>
             </text>
