@@ -18,3 +18,11 @@ export const InstallationUpstreamCommit =
   typeof OPENCODE_UPSTREAM_COMMIT === "string" ? OPENCODE_UPSTREAM_COMMIT : "unknown"
 export const InstallationForkCommit = typeof OPENCODE_FORK_COMMIT === "string" ? OPENCODE_FORK_COMMIT : "unknown"
 export const InstallationManaged = InstallationDistribution === "ZunbaRan/opencode"
+// The managed fork has its own CLI/SDK semver, but user Tools still import the
+// upstream plugin package. Resolve that public dependency from the upstream
+// baseline instead of requesting an unpublished `-oc.*` plugin version.
+export const InstallationPluginVersion = InstallationLocal
+  ? undefined
+  : InstallationManaged
+    ? InstallationUpstreamVersion
+    : InstallationVersion

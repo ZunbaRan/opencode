@@ -16,5 +16,16 @@ assert.doesNotMatch(dbSource, /openchamber/i)
 
 const versionSource = await Bun.file("packages/core/src/installation/version.ts").text()
 assert.match(versionSource, /ZunbaRan\/opencode/)
+assert.match(versionSource, /InstallationPluginVersion/)
+assert.match(versionSource, /InstallationUpstreamVersion/)
+
+for (const sourcePath of [
+  "packages/opencode/src/config/config.ts",
+  "packages/opencode/src/config/tui.ts",
+]) {
+  const source = await Bun.file(sourcePath).text()
+  assert.match(source, /version: InstallationPluginVersion/)
+  assert.doesNotMatch(source, /version: InstallationLocal \? undefined : InstallationVersion/)
+}
 
 console.log("OpenChamber compatibility invariants verified")
