@@ -16,6 +16,7 @@ const GlobalHealth = Schema.Struct({
 export const GlobalCapabilities = Schema.Struct({
   distribution: Schema.String,
   version: Schema.String,
+  upstreamVersion: Schema.String,
   channel: Schema.String,
   upstreamCommit: Schema.String,
   forkCommit: Schema.String,

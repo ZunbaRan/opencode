@@ -10,6 +10,7 @@ import {
   InstallationForkCommit,
   InstallationManaged,
   InstallationUpstreamCommit,
+  InstallationUpstreamVersion,
   InstallationVersion,
 } from "@opencode-ai/core/installation/version"
 import { Effect, Queue, Schema } from "effect"
@@ -86,6 +87,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
       return {
         distribution: InstallationDistribution,
         version: InstallationVersion,
+        upstreamVersion: InstallationUpstreamVersion,
         channel: InstallationChannel,
         upstreamCommit: InstallationUpstreamCommit,
         forkCommit: InstallationForkCommit,

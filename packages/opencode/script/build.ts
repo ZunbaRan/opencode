@@ -196,6 +196,7 @@ for (const item of targets) {
       FFF_LIBC: JSON.stringify(item.abi === "musl" ? "musl" : "gnu"),
       OPENCODE_VERSION: `'${Script.version}'`,
       OPENCODE_DISTRIBUTION: JSON.stringify(distribution),
+      OPENCODE_UPSTREAM_VERSION: JSON.stringify(pkg.version),
       OPENCODE_UPSTREAM_COMMIT: JSON.stringify(upstreamCommit),
       OPENCODE_FORK_COMMIT: JSON.stringify(forkCommit),
       OPENCODE_MODELS_DEV: generated.modelsData,

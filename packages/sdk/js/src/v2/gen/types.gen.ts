@@ -7319,6 +7319,7 @@ export type GlobalCapabilitiesResponses = {
   200: {
     distribution: string
     version: string
+    upstreamVersion: string
     channel: string
     upstreamCommit: string
     forkCommit: string
