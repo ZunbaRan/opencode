@@ -43,6 +43,25 @@ const apiLayer = HttpRouter.serve(
 const it = testEffect(apiLayer)
 
 describe("global HttpApi", () => {
+  it.live("reports the distribution and MCP feature handshake", () =>
+    Effect.gen(function* () {
+      const response = yield* HttpClient.get(GlobalPaths.capabilities)
+
+      expect(response.status).toBe(200)
+      expect(yield* response.json).toMatchObject({
+        distribution: "anomalyco/opencode",
+        apiVersion: "2",
+        managedUpdate: false,
+        features: {
+          mcpLegacy: true,
+          mcp20260728: true,
+          mcpApps: true,
+          mcpAppToolCall: true,
+        },
+      })
+    }),
+  )
+
   it.live("upgrades to latest when the request body is omitted", () =>
     Effect.gen(function* () {
       const response = yield* HttpClient.post(GlobalPaths.upgrade)

@@ -3,10 +3,17 @@ import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import { McpServerNotFoundError } from "../errors"
+import { MessageID, SessionID } from "@/session/schema"
+import { McpApp } from "@/mcp/app"
 import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
-import { WorkspaceRoutingMiddleware, WorkspaceRoutingQuery } from "../middleware/workspace-routing"
+import {
+  WorkspaceRoutingMiddleware,
+  WorkspaceRoutingQuery,
+  WorkspaceRoutingQueryFields,
+} from "../middleware/workspace-routing"
 import { described } from "./metadata"
+import { QueryBoolean } from "./query"
 
 export const AddPayload = Schema.Struct({
   name: Schema.String,
@@ -28,6 +35,31 @@ export class UnsupportedOAuthError extends Schema.ErrorClass<UnsupportedOAuthErr
   { error: Schema.String },
   { httpApiStatus: 400 },
 ) {}
+export class McpAppBindingError extends Schema.ErrorClass<McpAppBindingError>("McpAppBindingError")(
+  { error: Schema.String },
+  { httpApiStatus: 403 },
+) {}
+export class McpAppNotFoundError extends Schema.ErrorClass<McpAppNotFoundError>("McpAppNotFoundError")(
+  { error: Schema.String },
+  { httpApiStatus: 404 },
+) {}
+
+export const AppResourceQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
+  sessionID: SessionID,
+  messageID: MessageID,
+  server: Schema.String,
+  resourceUri: Schema.String,
+  force: Schema.optional(QueryBoolean),
+})
+export const AppToolCallPayload = Schema.Struct({
+  sessionID: SessionID,
+  messageID: MessageID,
+  server: Schema.String,
+  resourceUri: Schema.String,
+  name: Schema.String,
+  arguments: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+})
 
 export const McpPaths = {
   status: "/mcp",
@@ -36,6 +68,9 @@ export const McpPaths = {
   authAuthenticate: "/mcp/:name/auth/authenticate",
   connect: "/mcp/:name/connect",
   disconnect: "/mcp/:name/disconnect",
+  app: "/mcp/app",
+  appResource: "/mcp/app/resource",
+  appToolCall: "/mcp/app/tool-call",
 } as const
 
 export const McpApi = HttpApi.make("mcp")
@@ -134,6 +169,45 @@ export const McpApi = HttpApi.make("mcp")
           OpenApi.annotations({
             identifier: "mcp.disconnect",
             description: "Disconnect an MCP server.",
+          }),
+        ),
+      )
+      .add(
+        HttpApiEndpoint.get("appList", McpPaths.app, {
+          query: WorkspaceRoutingQuery,
+          success: described(
+            Schema.Record(Schema.String, McpApp.Definition),
+            "Available MCP Apps keyed by their model tool name",
+          ),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "mcp.app.list",
+            summary: "List MCP Apps",
+            description: "List connected MCP tools that declare a validated MCP App UI resource.",
+          }),
+        ),
+        HttpApiEndpoint.get("appResource", McpPaths.appResource, {
+          query: AppResourceQuery,
+          success: described(McpApp.Resource, "Validated MCP App HTML resource"),
+          error: [McpAppBindingError, McpAppNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "mcp.app.resource",
+            summary: "Get an MCP App resource",
+            description: "Read a validated UI resource bound to an MCP App tool result in the current session.",
+          }),
+        ),
+        HttpApiEndpoint.post("appToolCall", McpPaths.appToolCall, {
+          query: WorkspaceRoutingQuery,
+          payload: AppToolCallPayload,
+          success: described(Schema.Unknown, "MCP App tool call result"),
+          error: [McpAppBindingError, McpAppNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "mcp.app.tool-call",
+            summary: "Call an MCP App tool",
+            description:
+              "Call an app-visible tool on the MCP server bound to the current session, message, and UI resource.",
           }),
         ),
       )

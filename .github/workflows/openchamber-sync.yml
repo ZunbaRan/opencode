@@ -1,0 +1,44 @@
+name: sync upstream dev
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: openchamber-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: github.repository == 'ZunbaRan/opencode'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: openchamber-apps
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Merge upstream/dev
+        run: |
+          git config user.name "OpenChamber Sync"
+          git config user.email "actions@users.noreply.github.com"
+          git remote add upstream https://github.com/anomalyco/opencode.git
+          git fetch upstream dev
+          git merge --no-edit --no-ff upstream/dev
+      - run: bun install --frozen-lockfile
+      - name: Fork gates
+        run: |
+          bun --cwd packages/opencode typecheck
+          bun --cwd packages/opencode test --timeout 20000 --max-concurrency 2
+          bun run script/openchamber-compat.ts
+          bun --cwd packages/client run check:generated
+          bun packages/sdk/js/script/build.ts
+          git diff --exit-code -- packages/sdk/js/src/v2/gen
+      - name: Push merge commit
+        run: git push origin HEAD:openchamber-apps

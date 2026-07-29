@@ -22,6 +22,9 @@ const skipInstall = process.argv.includes("--skip-install")
 const sourcemapsFlag = process.argv.includes("--sourcemaps")
 const plugin = createSolidTransformPlugin()
 const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
+const distribution = process.env.OPENCODE_DISTRIBUTION ?? "anomalyco/opencode"
+const upstreamCommit = process.env.OPENCODE_UPSTREAM_COMMIT ?? "unknown"
+const forkCommit = process.env.OPENCODE_FORK_COMMIT ?? "unknown"
 
 const createEmbeddedWebUIBundle = async () => {
   console.log(`Building Web UI to embed in the binary`)
@@ -192,6 +195,9 @@ for (const item of targets) {
     define: {
       FFF_LIBC: JSON.stringify(item.abi === "musl" ? "musl" : "gnu"),
       OPENCODE_VERSION: `'${Script.version}'`,
+      OPENCODE_DISTRIBUTION: JSON.stringify(distribution),
+      OPENCODE_UPSTREAM_COMMIT: JSON.stringify(upstreamCommit),
+      OPENCODE_FORK_COMMIT: JSON.stringify(forkCommit),
       OPENCODE_MODELS_DEV: generated.modelsData,
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + treeSitterWorkerPath,
       OPENCODE_WORKER_PATH: workerPath,

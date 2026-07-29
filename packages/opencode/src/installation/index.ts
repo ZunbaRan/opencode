@@ -11,7 +11,11 @@ import { AppProcess } from "@opencode-ai/core/process"
 import path from "path"
 import { makeRuntime } from "@opencode-ai/core/effect/runtime"
 import semver from "semver"
-import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/installation/version"
+import {
+  InstallationChannel,
+  InstallationManaged,
+  InstallationVersion,
+} from "@opencode-ai/core/installation/version"
 import { NpmConfig } from "@opencode-ai/core/npm-config"
 import { InstallationEvent } from "@opencode-ai/schema/installation-event"
 
@@ -168,7 +172,7 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
       info: Effect.fn("Installation.info")(function* () {
         return {
           version: InstallationVersion,
-          latest: yield* result.latest(),
+          latest: InstallationManaged ? InstallationVersion : yield* result.latest(),
         }
       }),
       method: Effect.fn("Installation.method")(function* () {
@@ -206,6 +210,7 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
         return "unknown" as Method
       }),
       latest: Effect.fn("Installation.latest")(function* (installMethod?: Method) {
+        if (InstallationManaged) return InstallationVersion
         const detectedMethod = installMethod || (yield* result.method())
 
         if (detectedMethod === "brew") {
@@ -263,6 +268,11 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
         return data.tag_name.replace(/^v/, "")
       }, Effect.orDie),
       upgrade: Effect.fn("Installation.upgrade")(function* (m: Method, target: string) {
+        if (InstallationManaged) {
+          return yield* new UpgradeFailedError({
+            stderr: "This OpenCode distribution is managed by OpenChamber and cannot upgrade itself.",
+          })
+        }
         let upgradeResult: { code: number; stdout: string; stderr: string } | undefined
         switch (m) {
           case "curl":

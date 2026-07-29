@@ -192,6 +192,7 @@ it.instance("advertises and lists the instance directory as its root", () =>
     const roots = yield* pollWithTimeout(
       Effect.sync(() => server.state.roots),
       "server did not receive roots",
+      "10 seconds",
     )
     expect(roots).toEqual([{ uri: pathToFileURL(test.directory).href }])
   }),
@@ -539,7 +540,9 @@ it.instance("remote timeout aborts both real HTTP transport attempts", () =>
       Effect.sync(() => (server.aborted() >= 2 ? server.aborted() : undefined)),
       "remote transport requests were not aborted",
     )
-    expect(server.requests).toEqual(["POST", "GET"])
+    // The 2026 adapter probes server/discover before the legacy
+    // Streamable HTTP + SSE fallback pair.
+    expect(server.requests).toEqual(["POST", "POST", "GET"])
   }),
 )
 

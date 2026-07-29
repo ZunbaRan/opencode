@@ -4,7 +4,14 @@ import { EffectBridge } from "@/effect/bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
-import { InstallationVersion } from "@opencode-ai/core/installation/version"
+import {
+  InstallationChannel,
+  InstallationDistribution,
+  InstallationForkCommit,
+  InstallationManaged,
+  InstallationUpstreamCommit,
+  InstallationVersion,
+} from "@opencode-ai/core/installation/version"
 import { Effect, Queue, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
@@ -73,6 +80,24 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
 
     const health = Effect.fn("GlobalHttpApi.health")(function* () {
       return { healthy: true as const, version: InstallationVersion }
+    })
+
+    const capabilities = Effect.fn("GlobalHttpApi.capabilities")(function* () {
+      return {
+        distribution: InstallationDistribution,
+        version: InstallationVersion,
+        channel: InstallationChannel,
+        upstreamCommit: InstallationUpstreamCommit,
+        forkCommit: InstallationForkCommit,
+        apiVersion: "2",
+        managedUpdate: InstallationManaged,
+        features: {
+          mcpLegacy: true,
+          mcp20260728: true,
+          mcpApps: true,
+          mcpAppToolCall: true,
+        },
+      }
     })
 
     const event = Effect.fn("GlobalHttpApi.event")(function* () {
@@ -147,6 +172,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
 
     return handlers
       .handle("health", health)
+      .handle("capabilities", capabilities)
       .handleRaw("event", event)
       .handle("configGet", configGet)
       .handle("configUpdate", configUpdate)

@@ -76,6 +76,8 @@ import type {
   FindTextResponses,
   FormatterStatusErrors,
   FormatterStatusResponses,
+  GlobalCapabilitiesErrors,
+  GlobalCapabilitiesResponses,
   GlobalConfigGetErrors,
   GlobalConfigGetResponses,
   GlobalConfigUpdateErrors,
@@ -95,6 +97,12 @@ import type {
   LspStatusResponses,
   McpAddErrors,
   McpAddResponses,
+  McpAppListErrors,
+  McpAppListResponses,
+  McpAppResourceErrors,
+  McpAppResourceResponses,
+  McpAppToolCallErrors,
+  McpAppToolCallResponses,
   McpAuthAuthenticateErrors,
   McpAuthAuthenticateResponses,
   McpAuthCallbackErrors,
@@ -1329,6 +1337,18 @@ export class Global extends HeyApiClient {
   }
 
   /**
+   * Get distribution capabilities
+   *
+   * Get the OpenCode distribution identity, source revisions, API version, and optional feature support.
+   */
+  public capabilities<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).get<GlobalCapabilitiesResponses, GlobalCapabilitiesErrors, ThrowOnError>({
+      url: "/global/capabilities",
+      ...options,
+    })
+  }
+
+  /**
    * Get global events
    *
    * Subscribe to global events from the OpenCode system using server-sent events.
@@ -2391,6 +2411,127 @@ export class Auth2 extends HeyApiClient {
   }
 }
 
+export class App2 extends HeyApiClient {
+  /**
+   * List MCP Apps
+   *
+   * List connected MCP tools that declare a validated MCP App UI resource.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<McpAppListResponses, McpAppListErrors, ThrowOnError>({
+      url: "/mcp/app",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get an MCP App resource
+   *
+   * Read a validated UI resource bound to an MCP App tool result in the current session.
+   */
+  public resource<ThrowOnError extends boolean = false>(
+    parameters: {
+      directory?: string
+      workspace?: string
+      sessionID: string
+      messageID: string
+      server: string
+      resourceUri: string
+      force?: "true" | "false"
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "sessionID" },
+            { in: "query", key: "messageID" },
+            { in: "query", key: "server" },
+            { in: "query", key: "resourceUri" },
+            { in: "query", key: "force" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<McpAppResourceResponses, McpAppResourceErrors, ThrowOnError>({
+      url: "/mcp/app/resource",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Call an MCP App tool
+   *
+   * Call an app-visible tool on the MCP server bound to the current session, message, and UI resource.
+   */
+  public toolCall<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      sessionID?: string
+      messageID?: string
+      server?: string
+      resourceUri?: string
+      name?: string
+      arguments?: {
+        [key: string]: unknown
+      }
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "sessionID" },
+            { in: "body", key: "messageID" },
+            { in: "body", key: "server" },
+            { in: "body", key: "resourceUri" },
+            { in: "body", key: "name" },
+            { in: "body", key: "arguments" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<McpAppToolCallResponses, McpAppToolCallErrors, ThrowOnError>({
+      url: "/mcp/app/tool-call",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
 export class Mcp extends HeyApiClient {
   /**
    * Get MCP status
@@ -2524,6 +2665,11 @@ export class Mcp extends HeyApiClient {
   private _auth?: Auth2
   get auth(): Auth2 {
     return (this._auth ??= new Auth2({ client: this.client }))
+  }
+
+  private _app?: App2
+  get app(): App2 {
+    return (this._app ??= new App2({ client: this.client }))
   }
 }
 

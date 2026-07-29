@@ -2417,6 +2417,55 @@ export type McpServerNotFoundError = {
   message: string
 }
 
+export type McpAppMeta = {
+  resourceUri: string
+  visibility?: Array<"model" | "app">
+  maxHeight?: number
+  prefersBorder?: boolean
+  domain?: string
+  csp?: {
+    [key: string]: unknown
+  }
+  permissions?: {
+    [key: string]: unknown
+  }
+}
+
+export type McpAppDefinition = {
+  server: string
+  tool: string
+  toolKey: string
+  title: string
+  description?: string
+  meta: McpAppMeta
+}
+
+export type McpAppResource = {
+  server: string
+  resourceUri: string
+  mimeType: string
+  html: string
+  sha256: string
+  meta?: {
+    csp?: {
+      [key: string]: unknown
+    }
+    permissions?: {
+      [key: string]: unknown
+    }
+    domain?: string
+    prefersBorder?: boolean
+  }
+}
+
+export type McpAppBindingError = {
+  error: string
+}
+
+export type McpAppNotFoundError = {
+  error: string
+}
+
 export type Project = {
   id: string
   worktree: string
@@ -7247,6 +7296,45 @@ export type GlobalHealthResponses = {
 
 export type GlobalHealthResponse = GlobalHealthResponses[keyof GlobalHealthResponses]
 
+export type GlobalCapabilitiesData = {
+  body?: never
+  path?: never
+  query?: never
+  url: "/global/capabilities"
+}
+
+export type GlobalCapabilitiesErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type GlobalCapabilitiesError = GlobalCapabilitiesErrors[keyof GlobalCapabilitiesErrors]
+
+export type GlobalCapabilitiesResponses = {
+  /**
+   * Distribution and feature capabilities
+   */
+  200: {
+    distribution: string
+    version: string
+    channel: string
+    upstreamCommit: string
+    forkCommit: string
+    apiVersion: string
+    managedUpdate: boolean
+    features: {
+      mcpLegacy: boolean
+      mcp20260728: boolean
+      mcpApps: boolean
+      mcpAppToolCall: boolean
+    }
+  }
+}
+
+export type GlobalCapabilitiesResponse = GlobalCapabilitiesResponses[keyof GlobalCapabilitiesResponses]
+
 export type GlobalEventData = {
   body?: never
   path?: never
@@ -8697,6 +8785,120 @@ export type McpDisconnectResponses = {
 }
 
 export type McpDisconnectResponse = McpDisconnectResponses[keyof McpDisconnectResponses]
+
+export type McpAppListData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/mcp/app"
+}
+
+export type McpAppListErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type McpAppListError = McpAppListErrors[keyof McpAppListErrors]
+
+export type McpAppListResponses = {
+  /**
+   * Available MCP Apps keyed by their model tool name
+   */
+  200: {
+    [key: string]: McpAppDefinition
+  }
+}
+
+export type McpAppListResponse = McpAppListResponses[keyof McpAppListResponses]
+
+export type McpAppResourceData = {
+  body?: never
+  path?: never
+  query: {
+    directory?: string
+    workspace?: string
+    sessionID: string
+    messageID: string
+    server: string
+    resourceUri: string
+    force?: "true" | "false"
+  }
+  url: "/mcp/app/resource"
+}
+
+export type McpAppResourceErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * McpAppBindingError
+   */
+  403: McpAppBindingError
+  /**
+   * McpAppNotFoundError
+   */
+  404: McpAppNotFoundError
+}
+
+export type McpAppResourceError = McpAppResourceErrors[keyof McpAppResourceErrors]
+
+export type McpAppResourceResponses = {
+  /**
+   * Validated MCP App HTML resource
+   */
+  200: McpAppResource
+}
+
+export type McpAppResourceResponse = McpAppResourceResponses[keyof McpAppResourceResponses]
+
+export type McpAppToolCallData = {
+  body?: {
+    sessionID: string
+    messageID: string
+    server: string
+    resourceUri: string
+    name: string
+    arguments?: {
+      [key: string]: unknown
+    }
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/mcp/app/tool-call"
+}
+
+export type McpAppToolCallErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * McpAppBindingError
+   */
+  403: McpAppBindingError
+  /**
+   * McpAppNotFoundError
+   */
+  404: McpAppNotFoundError
+}
+
+export type McpAppToolCallError = McpAppToolCallErrors[keyof McpAppToolCallErrors]
+
+export type McpAppToolCallResponses = {
+  /**
+   * MCP App tool call result
+   */
+  200: unknown
+}
 
 export type ProjectListData = {
   body?: never

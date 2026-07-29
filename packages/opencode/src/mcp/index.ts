@@ -1,15 +1,14 @@
 import path from "node:path"
-import { pathToFileURL } from "node:url"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
-import { Client, type ClientOptions } from "@modelcontextprotocol/sdk/client/index.js"
+import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js"
 import {
-  ListRootsRequestSchema,
+  CallToolResultSchema,
   type LoggingMessageNotification,
   LoggingMessageNotificationSchema,
   type Tool as MCPToolDef,
@@ -18,7 +17,6 @@ import {
 import { Config } from "@/config/config"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { NamedError } from "@opencode-ai/core/util/error"
-import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { withTimeout } from "@/util/timeout"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { McpOAuthPendingProvider, McpOAuthProvider, OAUTH_CALLBACK_PATH } from "./oauth-provider"
@@ -34,20 +32,10 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { McpCatalog } from "./catalog"
 import { McpEvent } from "@opencode-ai/schema/mcp-event"
 import { McpBrowser } from "./browser"
+import { McpApp } from "./app"
+import { connectModernLocal, connectModernRemote, createLegacyClient } from "./connection-adapter"
 
 const DEFAULT_TIMEOUT = 30_000
-const CLIENT_OPTIONS = {
-  capabilities: {
-    // https://github.com/anomalyco/opencode/issues/11948
-    // sampling: {},
-    // https://github.com/anomalyco/opencode/issues/23066
-    // elicitation: {},
-    // https://github.com/anomalyco/opencode/issues/2308
-    roots: {},
-    // https://github.com/anomalyco/opencode/issues/28567
-    // tasks: {},
-  },
-} satisfies ClientOptions
 
 export const Resource = Schema.Struct({
   name: Schema.String,
@@ -73,11 +61,7 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("MCP
 type MCPClient = Client
 
 function createClient(directory: string) {
-  const client = new Client({ name: "opencode", version: InstallationVersion }, CLIENT_OPTIONS)
-  client.setRequestHandler(ListRootsRequestSchema, () =>
-    Promise.resolve({ roots: [{ uri: pathToFileURL(directory).href }] }),
-  )
-  return client
+  return createLegacyClient(directory)
 }
 
 const StatusConnected = Schema.Struct({ status: Schema.Literal("connected") }).annotate({
@@ -144,7 +128,33 @@ interface State {
   status: Record<string, Status>
   clients: Record<string, MCPClient>
   defs: Record<string, MCPToolDef[]>
+  apps: Record<string, McpApp.Definition>
+  appResources: Map<string, { value: McpApp.Resource; expiresAt: number }>
   instructions: Record<string, string>
+}
+
+function removeApps(state: State, server: string) {
+  state.apps = Object.fromEntries(Object.entries(state.apps).filter(([, app]) => app.server !== server))
+  for (const key of state.appResources.keys()) {
+    if (key.startsWith(`${server}\u0000`)) state.appResources.delete(key)
+  }
+}
+
+function storeApps(state: State, server: string, defs: MCPToolDef[]) {
+  removeApps(state, server)
+  for (const def of defs) {
+    const meta = McpApp.extract(def)
+    if (!meta) continue
+    const toolKey = McpCatalog.toolName(server, def.name)
+    state.apps[toolKey] = {
+      server,
+      tool: def.name,
+      toolKey,
+      title: def.title ?? def.name,
+      description: def.description,
+      meta,
+    }
+  }
 }
 
 export interface ServerInstructions {
@@ -166,6 +176,18 @@ export interface Interface {
   readonly clients: () => Effect.Effect<Record<string, MCPClient>>
   readonly instructions: () => Effect.Effect<ServerInstructions[]>
   readonly tools: () => Effect.Effect<Record<string, McpTool>>
+  readonly apps: () => Effect.Effect<Record<string, McpApp.Definition>>
+  readonly appResource: (
+    server: string,
+    resourceUri: string,
+    force?: boolean,
+  ) => Effect.Effect<McpApp.Resource | undefined>
+  readonly appToolCall: (
+    server: string,
+    resourceUri: string,
+    name: string,
+    args: Record<string, unknown>,
+  ) => Effect.Effect<Awaited<ReturnType<MCPClient["callTool"]>> | undefined>
   readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
   readonly resources: (clientName?: string) => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
   readonly resourceTemplates: (
@@ -286,6 +308,36 @@ const layer = Layer.effect(
       const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
       let lastStatus: Status | undefined
 
+      if (oauthDisabled) {
+        const directory = yield* InstanceState.directory
+        const modern = yield* Effect.tryPromise({
+          try: () =>
+            connectModernRemote({
+              directory,
+              url,
+              headers: mcp.headers,
+              timeout: connectTimeout,
+            }),
+          catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+        }).pipe(
+          Effect.tap((connection) =>
+            Effect.logInfo("MCP protocol negotiated", {
+              server: key,
+              adapter: connection.adapter,
+              era: connection.era,
+              protocolVersion: connection.protocolVersion,
+            }),
+          ),
+          Effect.catch((error) =>
+            Effect.logDebug("MCP 2026 adapter unavailable; trying legacy adapter", {
+              server: key,
+              error: error instanceof Error ? error.message : String(error),
+            }).pipe(Effect.as(undefined)),
+          ),
+        )
+        if (modern) return { client: modern.client, status: { status: "connected" } as Status }
+      }
+
       for (const { name, transport } of transports) {
         const result = yield* connectTransport(transport, connectTimeout).pipe(
           Effect.map((client) => ({ client, transportName: name })),
@@ -344,19 +396,55 @@ const layer = Layer.effect(
       const [cmd, ...args] = mcp.command
       const baseDir = yield* InstanceState.directory
       const cwd = mcp.cwd ? path.resolve(baseDir, mcp.cwd) : baseDir
+      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
+      const environment = {
+        ...process.env,
+        ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
+        ...mcp.environment,
+      }
+
+      const modern = yield* Effect.tryPromise({
+        try: () =>
+          connectModernLocal({
+            directory: baseDir,
+            command: cmd,
+            args,
+            cwd,
+            env: environment,
+            timeout: connectTimeout,
+          }),
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      }).pipe(
+        Effect.tap((connection) =>
+          Effect.logInfo("MCP protocol negotiated", {
+            server: key,
+            adapter: connection.adapter,
+            era: connection.era,
+            protocolVersion: connection.protocolVersion,
+          }),
+        ),
+        Effect.catch((error) =>
+          Effect.logDebug("MCP 2026 adapter unavailable; trying legacy adapter", {
+            server: key,
+            error: error instanceof Error ? error.message : String(error),
+          }).pipe(Effect.as(undefined)),
+        ),
+      )
+      if (modern) {
+        return {
+          client: modern.client,
+          status: { status: "connected" as const },
+        }
+      }
+
       const transport = new StdioClientTransport({
         stderr: "pipe",
         command: cmd,
         args,
         cwd,
-        env: {
-          ...process.env,
-          ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
-          ...mcp.environment,
-        },
+        env: environment,
       })
 
-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
       return yield* connectTransport(transport, connectTimeout).pipe(
         Effect.map((client): { client: MCPClient | undefined; status: Status } => ({
           client,
@@ -444,6 +532,7 @@ const layer = Layer.effect(
         if (s.clients[name] !== client) return
         delete s.clients[name]
         delete s.defs[name]
+        removeApps(s, name)
         delete s.instructions[name]
         s.status[name] = { status: "failed", error: "Connection closed" }
         bridge.fork(
@@ -467,6 +556,7 @@ const layer = Layer.effect(
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
         s.defs[name] = listed
+        storeApps(s, name, listed)
         await bridge.promise(events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
       })
     }
@@ -499,6 +589,8 @@ const layer = Layer.effect(
           status: {},
           clients: {},
           defs: {},
+          apps: {},
+          appResources: new Map(),
           instructions: {},
         }
 
@@ -521,6 +613,7 @@ const layer = Layer.effect(
               if (result.mcpClient) {
                 s.clients[key] = result.mcpClient
                 s.defs[key] = result.defs!
+                storeApps(s, key, result.defs!)
                 if (result.instructions) s.instructions[key] = result.instructions
                 watch(s, key, result.mcpClient, bridge, mcp.timeout)
               }
@@ -533,6 +626,8 @@ const layer = Layer.effect(
             const clients = Object.values(s.clients)
             s.clients = {}
             s.defs = {}
+            s.apps = {}
+            s.appResources.clear()
             s.instructions = {}
             yield* Effect.forEach(
               clients,
@@ -563,6 +658,7 @@ const layer = Layer.effect(
       const client = s.clients[name]
       delete s.clients[name]
       delete s.defs[name]
+      removeApps(s, name)
       delete s.instructions[name]
       if (!client) return Effect.void
       return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
@@ -581,6 +677,7 @@ const layer = Layer.effect(
       s.status[name] = { status: "connected" }
       s.clients[name] = client
       s.defs[name] = listed
+      storeApps(s, name, listed)
       if (instructions) s.instructions[name] = instructions
       else delete s.instructions[name]
       watch(s, name, client, bridge, timeout)
@@ -620,7 +717,9 @@ const layer = Layer.effect(
         .map(([name, item]) => ({
           name,
           instructions: item,
-          tools: (s.defs[name] ?? []).map((tool) => McpCatalog.toolName(name, tool.name)),
+          tools: (s.defs[name] ?? [])
+            .filter((tool) => McpApp.visibleToModel(tool))
+            .map((tool) => McpCatalog.toolName(name, tool.name)),
         }))
     })
 
@@ -681,10 +780,79 @@ const layer = Layer.effect(
         }
         const timeout = requestTimeout(s, clientName, mcpConfig, defaultTimeout)
         for (const def of listed) {
+          if (!McpApp.visibleToModel(def)) continue
           result[McpCatalog.toolName(clientName, def.name)] = { def, client, timeout }
         }
       }
       return result
+    })
+
+    const apps = Effect.fn("MCP.apps")(function* () {
+      return { ...(yield* InstanceState.get(state)).apps }
+    })
+
+    const appResource = Effect.fn("MCP.appResource")(function* (
+      server: string,
+      resourceUri: string,
+      force = false,
+    ) {
+      const s = yield* InstanceState.get(state)
+      if (!Object.values(s.apps).some((app) => app.server === server && app.meta.resourceUri === resourceUri)) {
+        return undefined
+      }
+      const key = `${server}\u0000${resourceUri}`
+      const cached = s.appResources.get(key)
+      if (!force && cached && cached.expiresAt > Date.now()) return cached.value
+
+      const result = yield* readResource(server, resourceUri)
+      const content = result?.contents.find(
+        (item) =>
+          "text" in item &&
+          (item.mimeType === "text/html;profile=mcp-app" || item.mimeType === "text/html"),
+      )
+      if (!content || !("text" in content)) return undefined
+      const bytes = new TextEncoder().encode(content.text)
+      if (bytes.byteLength > 2_000_000) return undefined
+      const value: McpApp.Resource = {
+        server,
+        resourceUri,
+        mimeType: content.mimeType ?? "text/html;profile=mcp-app",
+        html: content.text,
+        sha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+        meta: McpApp.resourceMeta(content._meta),
+      }
+      s.appResources.set(key, { value, expiresAt: Date.now() + 5 * 60_000 })
+      return value
+    })
+
+    const appToolCall = Effect.fn("MCP.appToolCall")(function* (
+      server: string,
+      resourceUri: string,
+      name: string,
+      args: Record<string, unknown>,
+    ) {
+      const s = yield* InstanceState.get(state)
+      const app = Object.values(s.apps).find(
+        (item) => item.server === server && item.meta.resourceUri === resourceUri,
+      )
+      if (!app) return undefined
+      const def = s.defs[server]?.find((item) => item.name === name)
+      const binding = def ? McpApp.extract(def) : undefined
+      if (!def || !McpApp.visibleToApp(def) || binding?.resourceUri !== resourceUri) return undefined
+      const client = s.clients[server]
+      if (!client) return undefined
+      const cfg = yield* cfgSvc.get()
+      return yield* Effect.tryPromise(() =>
+        client.callTool(
+          { name, arguments: args },
+          CallToolResultSchema,
+          {
+            timeout: requestTimeout(s, server, cfg.mcp?.[server], cfg.experimental?.mcp_timeout),
+            resetTimeoutOnProgress: true,
+            onprogress: () => {},
+          },
+        ),
+      ).pipe(Effect.orDie)
     })
 
     function collectFromConnected<T extends { name: string }>(
@@ -974,6 +1142,9 @@ const layer = Layer.effect(
       clients,
       instructions,
       tools,
+      apps,
+      appResource,
+      appToolCall,
       prompts,
       resources,
       resourceTemplates,

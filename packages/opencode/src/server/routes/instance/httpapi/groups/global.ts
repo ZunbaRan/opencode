@@ -13,6 +13,22 @@ const GlobalHealth = Schema.Struct({
   version: Schema.String,
 })
 
+export const GlobalCapabilities = Schema.Struct({
+  distribution: Schema.String,
+  version: Schema.String,
+  channel: Schema.String,
+  upstreamCommit: Schema.String,
+  forkCommit: Schema.String,
+  apiVersion: Schema.String,
+  managedUpdate: Schema.Boolean,
+  features: Schema.Struct({
+    mcpLegacy: Schema.Boolean,
+    mcp20260728: Schema.Boolean,
+    mcpApps: Schema.Boolean,
+    mcpAppToolCall: Schema.Boolean,
+  }),
+})
+
 const SyncEventSchemas = EventManifest.Latest.values()
   .flatMap((definition) => {
     if (!definition.durable) return []
@@ -64,6 +80,7 @@ const GlobalUpgradeResult = Schema.Union([
 
 export const GlobalPaths = {
   health: "/global/health",
+  capabilities: "/global/capabilities",
   event: "/global/event",
   config: "/global/config",
   dispose: "/global/dispose",
@@ -80,6 +97,16 @@ export const GlobalApi = HttpApi.make("global").add(
           identifier: "global.health",
           summary: "Get health",
           description: "Get health information about the OpenCode server.",
+        }),
+      ),
+      HttpApiEndpoint.get("capabilities", GlobalPaths.capabilities, {
+        success: described(GlobalCapabilities, "Distribution and feature capabilities"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "global.capabilities",
+          summary: "Get distribution capabilities",
+          description:
+            "Get the OpenCode distribution identity, source revisions, API version, and optional feature support.",
         }),
       ),
       HttpApiEndpoint.get("event", GlobalPaths.event, {

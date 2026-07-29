@@ -4,10 +4,18 @@ import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
 import { McpServerNotFoundError } from "../errors"
 import { AddPayload, AuthCallbackPayload, StatusMap, UnsupportedOAuthError } from "../groups/mcp"
+import {
+  AppResourceQuery,
+  AppToolCallPayload,
+  McpAppBindingError,
+  McpAppNotFoundError,
+} from "../groups/mcp"
+import { Session } from "@/session/session"
 
 export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handlers) =>
   Effect.gen(function* () {
     const mcp = yield* MCP.Service
+    const session = yield* Session.Service
 
     const status = Effect.fn("McpHttpApi.status")(function* () {
       return yield* mcp.status()
@@ -98,6 +106,37 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
       return true
     })
 
+    const appList = Effect.fn("McpHttpApi.appList")(function* () {
+      return yield* mcp.apps()
+    })
+
+    const appResource = Effect.fn("McpHttpApi.appResource")(function* (ctx: {
+      query: typeof AppResourceQuery.Type
+    }) {
+      if (!(yield* hasBinding(session, ctx.query))) {
+        return yield* new McpAppBindingError({ error: "MCP App resource is not bound to this session message" })
+      }
+      const resource = yield* mcp.appResource(ctx.query.server, ctx.query.resourceUri, ctx.query.force)
+      if (!resource) return yield* new McpAppNotFoundError({ error: "MCP App resource was not found" })
+      return resource
+    })
+
+    const appToolCall = Effect.fn("McpHttpApi.appToolCall")(function* (ctx: {
+      payload: typeof AppToolCallPayload.Type
+    }) {
+      if (!(yield* hasBinding(session, ctx.payload))) {
+        return yield* new McpAppBindingError({ error: "MCP App tool call is not bound to this session message" })
+      }
+      const result = yield* mcp.appToolCall(
+        ctx.payload.server,
+        ctx.payload.resourceUri,
+        ctx.payload.name,
+        ctx.payload.arguments ?? {},
+      )
+      if (!result) return yield* new McpAppNotFoundError({ error: "MCP App tool was not found or is not app-visible" })
+      return result
+    })
+
     return handlers
       .handle("status", status)
       .handle("add", add)
@@ -107,5 +146,33 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
       .handle("authRemove", authRemove)
       .handle("connect", connect)
       .handle("disconnect", disconnect)
+      .handle("appList", appList)
+      .handle("appResource", appResource)
+      .handle("appToolCall", appToolCall)
   }),
 )
+
+function hasBinding(
+  session: Session.Interface,
+  input: Pick<typeof AppToolCallPayload.Type, "sessionID" | "messageID" | "server" | "resourceUri">,
+) {
+  return session
+    .findMessage(input.sessionID, (message) => {
+      if (message.info.id !== input.messageID) return false
+      return message.parts.some((part) => {
+        if (part.type !== "tool" || part.state.status !== "completed") return false
+        const metadata = record(part.state.metadata)
+        const app = record(metadata?.mcpApp)
+        return app?.server === input.server && app?.resourceUri === input.resourceUri
+      })
+    })
+    .pipe(
+      Effect.map((message) => message._tag === "Some"),
+      Effect.orElseSucceed(() => false),
+    )
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return
+  return value as Record<string, unknown>
+}

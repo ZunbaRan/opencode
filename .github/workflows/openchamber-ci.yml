@@ -1,0 +1,50 @@
+name: openchamber fork ci
+
+on:
+  push:
+    branches:
+      - openchamber-apps
+  pull_request:
+    branches:
+      - openchamber-apps
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - name: Typecheck OpenCode
+        working-directory: packages/opencode
+        run: bun typecheck
+      - name: Test OpenCode
+        working-directory: packages/opencode
+        # Several upstream CLI integration cases intentionally spawn complete
+        # OpenCode processes. Bound test concurrency so platform runners do
+        # not turn their internal startup deadlines into load-related flakes.
+        run: bun test --timeout 20000 --max-concurrency 2
+      - name: Verify compatibility invariants
+        run: bun run script/openchamber-compat.ts
+      - name: Verify generated SDK
+        if: runner.os == 'Linux'
+        run: |
+          bun --cwd packages/client run check:generated
+          bun packages/sdk/js/script/build.ts
+          git diff --exit-code -- packages/sdk/js/src/v2/gen

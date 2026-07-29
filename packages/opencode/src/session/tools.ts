@@ -387,6 +387,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
 
   if (flags.experimentalCodeMode) return tools
 
+  const mcpApps = yield* mcp.apps()
   for (const [key, entry] of Object.entries(yield* mcp.tools())) {
     const item = McpCatalog.convertTool(entry.def, entry.client, entry.timeout)
     const execute = item.execute
@@ -464,6 +465,19 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           const truncated = yield* truncate.output(textParts.join("\n\n"), {}, input.agent)
           const metadata = {
             ...result.metadata,
+            ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
+            ...(!("_meta" in result) || result._meta === undefined ? {} : { mcpResultMeta: result._meta }),
+            ...(mcpApps[key]
+              ? {
+                  mcpApp: {
+                    server: mcpApps[key].server,
+                    tool: mcpApps[key].tool,
+                    toolKey: mcpApps[key].toolKey,
+                    resourceUri: mcpApps[key].meta.resourceUri,
+                    meta: mcpApps[key].meta,
+                  },
+                }
+              : {}),
             truncated: truncated.truncated,
             ...(truncated.truncated && { outputPath: truncated.outputPath }),
           }

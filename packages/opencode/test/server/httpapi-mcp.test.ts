@@ -220,4 +220,40 @@ describe("mcp HttpApi", () => {
       }),
     { config: { mcp: {} } },
   )
+
+  it.instance(
+    "lists MCP Apps and rejects resource or tool calls without a session-message binding",
+    () =>
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const handler = HttpApiApp.webHandler()
+        const listed = yield* request(handler, McpPaths.app, tmp.directory)
+        expect(listed.status).toBe(200)
+        expect(yield* json(listed)).toEqual({})
+
+        const binding = {
+          sessionID: "ses_01J5Y5H0AH4Q4NXJ6P4C3P5V2K",
+          messageID: "msg_01J5Y5H0AH4Q4NXJ6P4C3P5V2K",
+          server: "demo",
+          resourceUri: "ui://demo/dashboard",
+        }
+        const query = new URLSearchParams(binding).toString()
+        const resource = yield* request(handler, `${McpPaths.appResource}?${query}`, tmp.directory)
+        expect(resource.status).toBe(403)
+        expect(yield* json(resource)).toEqual({
+          error: "MCP App resource is not bound to this session message",
+        })
+
+        const toolCall = yield* request(handler, McpPaths.appToolCall, tmp.directory, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ...binding, name: "refresh", arguments: {} }),
+        })
+        expect(toolCall.status).toBe(403)
+        expect(yield* json(toolCall)).toEqual({
+          error: "MCP App tool call is not bound to this session message",
+        })
+      }),
+    { config: { mcp: {} } },
+  )
 })
