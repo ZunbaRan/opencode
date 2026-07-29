@@ -85,12 +85,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "v${{ inputs.version }}" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
-            gh release create "v${{ inputs.version }}" \
+          tag="v${{ inputs.version }}"
+          title="OpenCode ${{ inputs.version }} for OpenChamber"
+          notes="OpenChamber-managed OpenCode fork. Upstream dev: ${{ needs.validate-version.outputs.upstream }}. Fork: ${{ needs.validate-version.outputs.fork }}."
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release edit "$tag" \
               --repo "${{ github.repository }}" \
-              --title "OpenCode ${{ inputs.version }} for OpenChamber" \
-              --notes "OpenChamber-managed OpenCode fork. Upstream dev: ${{ needs.validate-version.outputs.upstream }}. Fork: ${{ needs.validate-version.outputs.fork }}." \
-              ${{ inputs.prerelease && '--prerelease' || '' }}
+              --title "$title" \
+              --notes "$notes" \
+              --prerelease=${{ inputs.prerelease }}
+          else
+            release_args=(release create "$tag" --repo "${{ github.repository }}" --title "$title" --notes "$notes")
+            if [[ "${{ inputs.prerelease }}" == "true" ]]; then
+              release_args+=(--prerelease)
+            fi
+            gh "${release_args[@]}"
+          fi
       - name: Build and upload all CLI platforms
         env:
           GH_TOKEN: ${{ github.token }}
