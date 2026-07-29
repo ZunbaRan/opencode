@@ -115,5 +115,8 @@ await Bun.write(sseTypesPath, sseTypesPatched)
 await $`bun prettier --write src/gen`
 await $`bun prettier --write src/v2`
 await $`rm -rf dist`
-await $`bun tsc`
+// The release workflow invokes this generator more than once. A composite
+// tsconfig can otherwise keep a valid tsbuildinfo file after `dist` is
+// removed and incorrectly skip every emit on the second invocation.
+await $`bun tsc --build --force`
 await $`rm openapi.json`
