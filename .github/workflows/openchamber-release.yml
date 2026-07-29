@@ -122,6 +122,23 @@ jobs:
           npm view "@zunbaran/opencode-sdk@${{ inputs.version }}" version --registry=https://npm.pkg.github.com >/dev/null 2>&1 || \
             npm publish .openchamber-sdk-package --registry=https://npm.pkg.github.com
           npm pack .openchamber-sdk-package --pack-destination packages/opencode/dist
+          sdk_smoke="$(mktemp -d)"
+          npm install --prefix "$sdk_smoke" \
+            "$GITHUB_WORKSPACE/packages/opencode/dist/zunbaran-opencode-sdk-${{ inputs.version }}.tgz"
+          (
+            cd "$sdk_smoke"
+            node --input-type=module - <<'NODE'
+          import { createOpencodeClient } from "@zunbaran/opencode-sdk/v2"
+          const client = createOpencodeClient({ baseUrl: "http://127.0.0.1:9" })
+          if (
+            typeof client.global.capabilities !== "function" ||
+            typeof client.mcp.app.resource !== "function" ||
+            typeof client.mcp.app.toolCall !== "function"
+          ) {
+            throw new Error("Fork SDK is missing required OpenChamber capabilities")
+          }
+          NODE
+          )
       - name: Create checksums and provenance
         env:
           RELEASE_VERSION: ${{ inputs.version }}

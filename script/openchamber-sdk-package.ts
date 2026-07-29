@@ -21,6 +21,9 @@ await Bun.write(
       license: "MIT",
       type: "module",
       files: ["dist"],
+      dependencies: {
+        "cross-spawn": "7.0.6",
+      },
       exports: {
         ".": "./dist/index.js",
         "./client": "./dist/client.js",
