@@ -1,11 +1,16 @@
 import { describe, expect } from "bun:test"
 import { Context, Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
 import { McpPaths } from "../../src/server/routes/instance/httpapi/groups/mcp"
 import { Server } from "../../src/server/server"
 import { resetDatabase } from "../fixture/db"
-import { TestInstance } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { provideInstanceEffect, TestInstance } from "../fixture/fixture"
+import { testEffectShared } from "../lib/effect"
+import { Session } from "../../src/session/session"
+import { MessageID, PartID, SessionID } from "../../src/session/schema"
 
 const context = Context.empty() as Context.Context<unknown>
 const testStateLayer = Layer.effectDiscard(
@@ -14,7 +19,7 @@ const testStateLayer = Layer.effectDiscard(
     yield* Effect.addFinalizer(() => Effect.promise(() => resetDatabase()).pipe(Effect.ignore))
   }),
 )
-const it = testEffect(testStateLayer)
+const it = testEffectShared(Layer.mergeAll(testStateLayer, LayerNode.compile(Session.node)))
 
 function app() {
   return Server.Default().app
@@ -44,6 +49,7 @@ const request = Effect.fnUntraced(function* (
 })
 
 const json = <A>(response: Response) => Effect.promise(() => response.json() as Promise<A>)
+const modernFixture = new URL("../mcp/fixtures/mcp-2026-server.ts", import.meta.url).pathname
 
 const readResponse = Effect.fnUntraced(function* (input: { app: TestApp; path: string; headers: HeadersInit }) {
   const response = yield* Effect.promise(() =>
@@ -255,5 +261,106 @@ describe("mcp HttpApi", () => {
         })
       }),
     { config: { mcp: {} } },
+  )
+
+  it.instance(
+    "requires the session, message, server, resource, and app-visible tool binding",
+    () =>
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const handler = HttpApiApp.webHandler()
+        const binding = yield* provideInstanceEffect(tmp.directory)(
+          Effect.gen(function* () {
+            const sessions = yield* Session.Service
+            const info = yield* sessions.create({})
+            const messageID = MessageID.ascending()
+            yield* sessions.updateMessage({
+              id: messageID,
+              sessionID: info.id,
+              role: "user",
+              time: { created: Date.now() },
+              agent: "test",
+              model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
+            })
+            yield* sessions.updatePart({
+              id: PartID.ascending(),
+              sessionID: info.id,
+              messageID,
+              type: "tool",
+              tool: "demo_open_dashboard",
+              callID: "call-mcp-app",
+              state: {
+                status: "completed",
+                input: {},
+                output: "opened",
+                title: "Open dashboard",
+                metadata: {
+                  mcpApp: {
+                    server: "demo",
+                    resourceUri: "ui://openchamber/test-dashboard",
+                  },
+                },
+                time: { start: Date.now(), end: Date.now() },
+              },
+            })
+            return {
+              sessionID: info.id,
+              messageID,
+              server: "demo",
+              resourceUri: "ui://openchamber/test-dashboard",
+            }
+          }),
+        )
+
+        const accepted = yield* request(handler, McpPaths.appToolCall, tmp.directory, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ...binding, name: "refresh_dashboard", arguments: {} }),
+        })
+        expect(accepted.status).toBe(200)
+
+        const ambiguousUnboundHelper = yield* request(handler, McpPaths.appToolCall, tmp.directory, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ...binding, name: "ambiguous_app_helper", arguments: {} }),
+        })
+        expect(ambiguousUnboundHelper.status).toBe(404)
+
+        for (const changed of [
+          { sessionID: SessionID.make("ses_01J5Y5H0AH4Q4NXJ6P4C3P5V2K") },
+          { messageID: MessageID.ascending() },
+          { server: "other-server" },
+          { resourceUri: "ui://openchamber/other-dashboard" },
+        ]) {
+          const response = yield* request(handler, McpPaths.appToolCall, tmp.directory, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              ...binding,
+              ...changed,
+              name: "refresh_dashboard",
+              arguments: {},
+            }),
+          })
+          expect(response.status).toBe(403)
+        }
+
+        const wrongTool = yield* request(handler, McpPaths.appToolCall, tmp.directory, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ...binding, name: "missing_tool", arguments: {} }),
+        })
+        expect(wrongTool.status).toBe(404)
+      }),
+    {
+      config: {
+        mcp: {
+          demo: {
+            type: "local",
+            command: [process.execPath, modernFixture],
+          },
+        },
+      },
+    },
   )
 })

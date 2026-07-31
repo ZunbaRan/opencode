@@ -13,8 +13,10 @@ import {
   type ServerCapabilities,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js"
+import { CLIENT_CAPABILITIES_META_KEY, createMcpHandler, McpServer } from "@modelcontextprotocol/server"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Effect, Exit } from "effect"
+import { z } from "zod"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 import { MCP } from "../../src/mcp/index"
 import { McpOAuthCallback } from "../../src/mcp/oauth-callback"
@@ -40,6 +42,23 @@ interface LifecycleServerState {
   roots?: Array<{ uri: string; name?: string }>
   requests: string[]
   aborted: number
+}
+
+const appExtension = "io.modelcontextprotocol/ui"
+const appMimeType = "text/html;profile=mcp-app"
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined
+  return value as Record<string, unknown>
+}
+
+function requestSupportsApps(context: unknown) {
+  const mcpReq = asRecord(asRecord(context)?.mcpReq)
+  const envelope = asRecord(mcpReq?.envelope)
+  const capabilities = asRecord(envelope?.[CLIENT_CAPABILITIES_META_KEY])
+  const extensions = asRecord(capabilities?.extensions)
+  const app = asRecord(extensions?.[appExtension])
+  return Array.isArray(app?.mimeTypes) && app.mimeTypes.includes(appMimeType)
 }
 
 function lifecycleServer(input?: { capabilities?: ServerCapabilities; instructions?: string; requestRoots?: boolean }) {
@@ -133,7 +152,7 @@ function lifecycleServer(input?: { capabilities?: ServerCapabilities; instructio
         },
         close: async () => {
           await current.protocol.close().catch(() => {})
-          http.stop(true)
+          await http.stop(true)
         },
       }
     }),
@@ -157,8 +176,20 @@ function hangingLifecycleServer() {
         port: 0,
         fetch(request) {
           requests.push(request.method)
-          request.signal.addEventListener("abort", () => aborted++)
-          return new Promise<Response>(() => {})
+          return new Promise<Response>((resolve) => {
+            const onAbort = () => {
+              aborted++
+              // A client-side abort does not settle an arbitrary promise
+              // returned by Bun.serve. Leaving this promise pending leaks one
+              // server handler per transport probe and can make stop(true)
+              // wait behind earlier tests. Resolve only after the abort so the
+              // endpoint still behaves like a genuinely hanging server while
+              // releasing the server-side request deterministically.
+              resolve(new Response("aborted", { status: 499 }))
+            }
+            if (request.signal.aborted) onAbort()
+            else request.signal.addEventListener("abort", onAbort, { once: true })
+          })
         },
       })
       return {
@@ -167,11 +198,102 @@ function hangingLifecycleServer() {
         url: http.url.toString(),
         close: async () => {
           await protocol.close().catch(() => {})
-          http.stop(true)
+          await http.stop(true)
         },
       }
     }),
     (server) => Effect.promise(server.close),
+  )
+}
+
+function modernAppServer() {
+  return Effect.acquireRelease(
+    Effect.sync(() => {
+      const state = { receivedAppsCapability: false }
+      const resourceUri = "ui://openchamber/remote-2026"
+      const handler = createMcpHandler(
+        () => {
+          const server = new McpServer(
+            { name: "openchamber-remote-2026", version: "1.0.0" },
+            {
+              capabilities: {
+                tools: {},
+                resources: {},
+                extensions: {
+                  [appExtension]: {},
+                },
+              },
+            },
+          )
+          const registerTool = server.registerTool.bind(server) as unknown as (
+            name: string,
+            config: Record<string, unknown>,
+            callback: (input: unknown, context: unknown) => unknown,
+          ) => unknown
+
+          registerTool(
+            "open_dashboard",
+            {
+              inputSchema: z.object({}),
+              _meta: {
+                ui: {
+                  resourceUri,
+                  visibility: ["model", "app"],
+                },
+              },
+            },
+            async (_input, context) => {
+              const supported = requestSupportsApps(context)
+              state.receivedAppsCapability ||= supported
+              if (!supported) {
+                return {
+                  content: [{ type: "text" as const, text: "MCP App capability required; text fallback only." }],
+                }
+              }
+              return {
+                content: [{ type: "text" as const, text: "remote dashboard" }],
+                structuredContent: { revision: 1 },
+              }
+            },
+          )
+
+          registerTool(
+            "refresh_dashboard",
+            {
+              inputSchema: z.object({}),
+              _meta: {
+                ui: {
+                  visibility: ["app"],
+                },
+              },
+            },
+            async () => ({ content: [{ type: "text" as const, text: "refreshed" }] }),
+          )
+
+          server.registerResource("remote-dashboard", resourceUri, { mimeType: appMimeType }, async (uri) => ({
+            contents: [
+              {
+                uri: uri.href,
+                mimeType: appMimeType,
+                text: "<!doctype html><html><body>remote 2026 app</body></html>",
+              },
+            ],
+          }))
+          return server
+        },
+        { legacy: "reject" },
+      )
+      const http = Bun.serve({
+        port: 0,
+        fetch: (request) => handler.fetch(request),
+      })
+      return {
+        url: http.url.toString(),
+        receivedAppsCapability: () => state.receivedAppsCapability,
+        close: () => http.stop(true),
+      }
+    }),
+    (server) => Effect.sync(server.close),
   )
 }
 
@@ -181,6 +303,46 @@ function statusName(status: Record<string, MCPNS.Status> | MCPNS.Status, server:
 }
 
 const remote = (url: string, timeout?: number) => ({ type: "remote" as const, url, oauth: false as const, timeout })
+
+it.instance("remote oauth:false negotiates strict MCP 2026 Apps and hides app-only tools from the model", () =>
+  Effect.gen(function* () {
+    const server = yield* modernAppServer()
+    const mcp = yield* MCP.Service
+    yield* mcp.add("modern-app", remote(server.url))
+
+    expect((yield* mcp.status())["modern-app"]).toEqual({
+      status: "connected",
+      protocolVersion: "2026-07-28",
+      era: "2026-07-28",
+      adapter: "2026-sdk",
+      apps: {
+        client: true,
+        server: true,
+        negotiated: true,
+      },
+    })
+
+    const tools = yield* mcp.tools()
+    expect(Object.keys(tools)).toEqual(["modern-app_open_dashboard"])
+    const opened = yield* Effect.promise(() =>
+      tools["modern-app_open_dashboard"].client.callTool({
+        name: "open_dashboard",
+        arguments: {},
+      }),
+    )
+    expect(opened.structuredContent).toEqual({ revision: 1 })
+    expect(server.receivedAppsCapability()).toBe(true)
+
+    const appOnly = yield* mcp.appToolCall("modern-app", "ui://openchamber/remote-2026", "refresh_dashboard", {})
+    expect(appOnly?.content).toEqual([{ type: "text", text: "refreshed" }])
+    expect(
+      yield* mcp.appToolCall("modern-app", "ui://openchamber/wrong-resource", "refresh_dashboard", {}),
+    ).toBeUndefined()
+    expect(
+      yield* mcp.appToolCall("wrong-server", "ui://openchamber/remote-2026", "refresh_dashboard", {}),
+    ).toBeUndefined()
+  }),
+)
 
 it.instance("advertises and lists the instance directory as its root", () =>
   Effect.gen(function* () {
@@ -432,6 +594,9 @@ it.instance("uses per-server timeouts for prompt and resource requests", () =>
     expect(yield* mcp.getPrompt("timeout-server", "test")).toBeUndefined()
     expect(yield* mcp.readResource("timeout-server", "test://resource")).toBeUndefined()
   }),
+  // The assertions prove the 50 ms per-request timeout itself. Leave enough
+  // wall-clock budget for Bun/Effect fixture teardown on swap-heavy CI hosts.
+  { timeout: 20_000 },
 )
 
 it.instance("connects resource-only, prompt-only, and tools-only servers", () =>
@@ -533,17 +698,23 @@ it.instance("remote timeout aborts both real HTTP transport attempts", () =>
   Effect.gen(function* () {
     const server = yield* hangingLifecycleServer()
     const mcp = yield* MCP.Service
-    const result = yield* mcp.add("hanging-remote", remote(server.url, 100))
+    // Keep the deadline short enough to exercise cancellation while allowing
+    // Bun's EventSource-backed SSE transport to actually dispatch its GET on
+    // a loaded full-file run. A 100 ms deadline can expire in the scheduler
+    // before the request reaches the in-process server, which tests startup
+    // latency rather than transport cancellation.
+    const result = yield* mcp.add("hanging-remote", remote(server.url, 300))
 
     expect(statusName(result.status, "hanging-remote")).toBe("failed")
     yield* pollWithTimeout(
-      Effect.sync(() => (server.aborted() >= 2 ? server.aborted() : undefined)),
+      Effect.sync(() => (server.aborted() >= 3 ? server.aborted() : undefined)),
       "remote transport requests were not aborted",
     )
     // The 2026 adapter probes server/discover before the legacy
     // Streamable HTTP + SSE fallback pair.
     expect(server.requests).toEqual(["POST", "POST", "GET"])
   }),
+  { timeout: 10_000 },
 )
 
 it.live("McpOAuthCallback.cancelPending rejects the pending callback", () =>

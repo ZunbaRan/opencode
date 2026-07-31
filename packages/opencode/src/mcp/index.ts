@@ -18,7 +18,6 @@ import { Config } from "@/config/config"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { withTimeout } from "@/util/timeout"
-import { FSUtil } from "@opencode-ai/core/fs-util"
 import { McpOAuthPendingProvider, McpOAuthProvider, OAUTH_CALLBACK_PATH } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
 import { McpAuth } from "./auth"
@@ -33,7 +32,13 @@ import { McpCatalog } from "./catalog"
 import { McpEvent } from "@opencode-ai/schema/mcp-event"
 import { McpBrowser } from "./browser"
 import { McpApp } from "./app"
-import { connectModernLocal, connectModernRemote, createLegacyClient } from "./connection-adapter"
+import {
+  connectModernLocal,
+  connectModernRemote,
+  createLegacyClient,
+  describeLegacyClient,
+  type McpConnection,
+} from "./connection-adapter"
 
 const DEFAULT_TIMEOUT = 30_000
 
@@ -64,9 +69,17 @@ function createClient(directory: string) {
   return createLegacyClient(directory)
 }
 
-const StatusConnected = Schema.Struct({ status: Schema.Literal("connected") }).annotate({
-  identifier: "MCPStatusConnected",
-})
+const StatusConnected = Schema.Struct({
+  status: Schema.Literal("connected"),
+  protocolVersion: Schema.optional(Schema.String),
+  era: Schema.Union([Schema.Literal("legacy"), Schema.Literal("2026-07-28")]),
+  adapter: Schema.Union([Schema.Literal("legacy-sdk"), Schema.Literal("2026-sdk")]),
+  apps: Schema.Struct({
+    client: Schema.Boolean,
+    server: Schema.Boolean,
+    negotiated: Schema.Boolean,
+  }),
+}).annotate({ identifier: "MCPStatusConnected" })
 const StatusDisabled = Schema.Struct({ status: Schema.Literal("disabled") }).annotate({
   identifier: "MCPStatusDisabled",
 })
@@ -89,6 +102,17 @@ export const Status = Schema.Union([
   StatusNeedsClientRegistration,
 ]).annotate({ identifier: "MCPStatus", discriminator: "status" })
 export type Status = Schema.Schema.Type<typeof Status>
+type ConnectedStatus = Schema.Schema.Type<typeof StatusConnected>
+
+function connectedStatus(connection: McpConnection): ConnectedStatus {
+  return {
+    status: "connected",
+    protocolVersion: connection.protocolVersion,
+    era: connection.era,
+    adapter: connection.adapter,
+    apps: connection.apps,
+  }
+}
 
 // Store transports for OAuth servers to allow finishing auth
 type TransportWithAuth = StreamableHTTPClientTransport | SSEClientTransport
@@ -245,7 +269,7 @@ const layer = Layer.effect(
           Effect.tryPromise({
             try: () => {
               const client = createClient(directory)
-              return withTimeout(client.connect(t), timeout).then(() => client)
+              return withTimeout(client.connect(t), timeout).then(() => describeLegacyClient(client))
             },
             catch: (e) => (e instanceof Error ? e : new Error(String(e))),
           }),
@@ -335,12 +359,12 @@ const layer = Layer.effect(
             }).pipe(Effect.as(undefined)),
           ),
         )
-        if (modern) return { client: modern.client, status: { status: "connected" } as Status }
+        if (modern) return { client: modern.client, status: connectedStatus(modern) }
       }
 
       for (const { name, transport } of transports) {
         const result = yield* connectTransport(transport, connectTimeout).pipe(
-          Effect.map((client) => ({ client, transportName: name })),
+          Effect.map((connection) => ({ connection, transportName: name })),
           Effect.catch((error) => {
             const lastError = error instanceof Error ? error : new Error(String(error))
             const isAuthError =
@@ -378,14 +402,19 @@ const layer = Layer.effect(
             return Effect.void
           }),
         )
-        if (result) return { client: result.client, status: { status: "connected" } as Status }
+        if (result) {
+          return {
+            client: result.connection.client,
+            status: connectedStatus(result.connection),
+          }
+        }
         // If this was an auth error, stop trying other transports
         if (lastStatus?.status === "needs_auth" || lastStatus?.status === "needs_client_registration") break
       }
 
       return {
         client: undefined as MCPClient | undefined,
-        status: (lastStatus ?? { status: "failed", error: "Unknown error" }) as Status,
+        status: lastStatus ?? { status: "failed", error: "Unknown error" },
       }
     })
 
@@ -433,7 +462,7 @@ const layer = Layer.effect(
       if (modern) {
         return {
           client: modern.client,
-          status: { status: "connected" as const },
+          status: connectedStatus(modern),
         }
       }
 
@@ -446,9 +475,9 @@ const layer = Layer.effect(
       })
 
       return yield* connectTransport(transport, connectTimeout).pipe(
-        Effect.map((client): { client: MCPClient | undefined; status: Status } => ({
-          client,
-          status: { status: "connected" },
+        Effect.map((connection): { client: MCPClient | undefined; status: Status } => ({
+          client: connection.client,
+          status: connectedStatus(connection),
         })),
         Effect.catch((error): Effect.Effect<{ client: MCPClient | undefined; status: Status }> => {
           const msg = error instanceof Error ? error.message : String(error)
@@ -670,11 +699,12 @@ const layer = Layer.effect(
       client: MCPClient,
       listed: MCPToolDef[],
       instructions: string | undefined,
+      connected: ConnectedStatus,
       timeout?: number,
     ) {
       const bridge = yield* EffectBridge.make()
       const previous = s.clients[name]
-      s.status[name] = { status: "connected" }
+      s.status[name] = connected
       s.clients[name] = client
       s.defs[name] = listed
       storeApps(s, name, listed)
@@ -734,7 +764,16 @@ const layer = Layer.effect(
         return result.status
       }
 
-      return yield* storeClient(s, name, result.mcpClient, result.defs!, result.instructions, mcp.timeout)
+      if (result.status.status !== "connected") return result.status
+      return yield* storeClient(
+        s,
+        name,
+        result.mcpClient,
+        result.defs!,
+        result.instructions,
+        result.status,
+        mcp.timeout,
+      )
     })
 
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
@@ -811,8 +850,15 @@ const layer = Layer.effect(
           (item.mimeType === "text/html;profile=mcp-app" || item.mimeType === "text/html"),
       )
       if (!content || !("text" in content)) return undefined
-      const bytes = new TextEncoder().encode(content.text)
-      if (bytes.byteLength > 2_000_000) return undefined
+      const bytes = McpApp.resourceBytes(content.text)
+      if (!bytes) {
+        yield* Effect.logWarning("MCP App resource exceeds the HTML size limit", {
+          server,
+          resourceUri,
+          maxBytes: McpApp.MAX_RESOURCE_BYTES,
+        })
+        return undefined
+      }
       const value: McpApp.Resource = {
         server,
         resourceUri,
@@ -837,8 +883,22 @@ const layer = Layer.effect(
       )
       if (!app) return undefined
       const def = s.defs[server]?.find((item) => item.name === name)
-      const binding = def ? McpApp.extract(def) : undefined
-      if (!def || !McpApp.visibleToApp(def) || binding?.resourceUri !== resourceUri) return undefined
+      if (!def) return undefined
+      const resourceUris = new Set(
+        Object.values(s.apps)
+          .filter((item) => item.server === server)
+          .map((item) => item.meta.resourceUri),
+      )
+      if (
+        !McpApp.callableFromResource(def, resourceUri, {
+          // Excalidraw v0.3.2 does not repeat resourceUri on its app-only
+          // checkpoint/export helpers. That omission is unambiguous only for
+          // a server exposing exactly one MCP App resource.
+          allowUnboundAppOnly: resourceUris.size === 1,
+        })
+      ) {
+        return undefined
+      }
       const client = s.clients[server]
       if (!client) return undefined
       const cfg = yield* cfgSvc.get()
@@ -1060,7 +1120,15 @@ const layer = Layer.effect(
 
         const s = yield* InstanceState.get(state)
         yield* auth.clearOAuthState(mcpName)
-        return yield* storeClient(s, mcpName, client, listed, client.getInstructions()?.trim(), mcpConfig.timeout)
+        return yield* storeClient(
+          s,
+          mcpName,
+          client,
+          listed,
+          client.getInstructions()?.trim(),
+          connectedStatus(describeLegacyClient(client)),
+          mcpConfig.timeout,
+        )
       }
 
       const callbackPromise = McpOAuthCallback.waitForCallback(result.oauthState, mcpName)

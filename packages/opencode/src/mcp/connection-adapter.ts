@@ -4,15 +4,26 @@ import type { ClientOptions as LegacyClientOptions } from "@modelcontextprotocol
 import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import {
   Client as ModernClient,
+  type ClientCapabilities,
   StreamableHTTPClientTransport as ModernHTTPTransport,
 } from "@modelcontextprotocol/client"
 import { StdioClientTransport as ModernStdioTransport } from "@modelcontextprotocol/client/stdio"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { withTimeout } from "@/util/timeout"
 
+export const MCP_APP_EXTENSION = "io.modelcontextprotocol/ui"
+export const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app"
+
+const MCP_APP_CAPABILITY = {
+  mimeTypes: [MCP_APP_MIME_TYPE],
+}
+
 const CLIENT_CAPABILITIES = {
   capabilities: {
     roots: {},
+    extensions: {
+      [MCP_APP_EXTENSION]: MCP_APP_CAPABILITY,
+    },
   },
 } satisfies LegacyClientOptions
 
@@ -28,6 +39,11 @@ export interface McpConnection {
   era: McpConnectionEra
   protocolVersion?: string
   adapter: "legacy-sdk" | "2026-sdk"
+  apps: {
+    client: boolean
+    server: boolean
+    negotiated: boolean
+  }
 }
 
 function roots(directory: string) {
@@ -41,10 +57,16 @@ export function createLegacyClient(directory: string) {
 }
 
 function createModernClient(directory: string) {
+  const capabilities = {
+    roots: {},
+    extensions: {
+      [MCP_APP_EXTENSION]: MCP_APP_CAPABILITY,
+    },
+  } satisfies ClientCapabilities
   const client = new ModernClient(
     { name: "opencode", version: InstallationVersion },
     {
-      capabilities: { roots: {} },
+      capabilities,
       versionNegotiation: {
         mode: "auto",
         probe: { timeoutMs: 4_000, maxRetries: 0 },
@@ -53,6 +75,35 @@ function createModernClient(directory: string) {
   )
   client.setRequestHandler("roots/list", () => roots(directory))
   return client
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined
+  return value as Record<string, unknown>
+}
+
+function serverSupportsApps(client: Pick<LegacyClient, "getServerCapabilities">) {
+  const capabilities = asRecord(client.getServerCapabilities())
+  const extensions = asRecord(capabilities?.extensions)
+  return !!asRecord(extensions?.[MCP_APP_EXTENSION])
+}
+
+function appsCapability(client: Pick<LegacyClient, "getServerCapabilities">) {
+  const server = serverSupportsApps(client)
+  return {
+    client: true,
+    server,
+    negotiated: server,
+  }
+}
+
+export function describeLegacyClient(client: LegacyClient): McpConnection {
+  return {
+    client,
+    era: "legacy",
+    adapter: "legacy-sdk",
+    apps: appsCapability(client),
+  }
 }
 
 function notificationMethod(schema: unknown) {
@@ -83,8 +134,10 @@ function adapt(client: ModernClient, closeTransport: () => Promise<void>): Legac
     get(target, property) {
       if (property === "close") {
         return async () => {
-          await target.close().catch(() => {})
+          // Abort the transport first so any timed-out request cannot keep
+          // client.close() waiting for a response that will never arrive.
           await closeTransport().catch(() => {})
+          await target.close().catch(() => {})
         }
       }
       if (
@@ -152,11 +205,13 @@ function adapt(client: ModernClient, closeTransport: () => Promise<void>): Legac
 
 function result(client: ModernClient, closeTransport: () => Promise<void>): McpConnection {
   const protocolVersion = client.getNegotiatedProtocolVersion()
+  const adapted = adapt(client, closeTransport)
   return {
-    client: adapt(client, closeTransport),
+    client: adapted,
     era: client.getProtocolEra() === "modern" ? "2026-07-28" : "legacy",
     protocolVersion,
     adapter: "2026-sdk",
+    apps: appsCapability(adapted),
   }
 }
 
@@ -174,6 +229,11 @@ export async function connectModernRemote(input: {
     await withTimeout(client.connect(transport), input.timeout)
     return result(client, () => transport.close())
   } catch (error) {
+    // A timed-out connect has not transferred transport ownership to the
+    // returned McpConnection yet. Abort the in-flight fetch before asking the
+    // client to unwind its protocol state; client.close() alone can otherwise
+    // wait on the request that just exceeded our deadline.
+    await transport.close().catch(() => {})
     await client.close().catch(() => {})
     throw error
   }
@@ -199,6 +259,7 @@ export async function connectModernLocal(input: {
     await withTimeout(client.connect(transport), input.timeout)
     return result(client, () => transport.close())
   } catch (error) {
+    await transport.close().catch(() => {})
     await client.close().catch(() => {})
     throw error
   }

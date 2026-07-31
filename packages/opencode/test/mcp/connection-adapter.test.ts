@@ -21,6 +21,11 @@ describe("MCP 2026 connection adapter", () => {
       expect(connection.adapter).toBe("2026-sdk")
       expect(connection.era).toBe("2026-07-28")
       expect(connection.protocolVersion).toBe("2026-07-28")
+      expect(connection.apps).toEqual({
+        client: true,
+        server: true,
+        negotiated: true,
+      })
 
       const listed = await connection.client.listTools()
       const open = listed.tools.find((tool) => tool.name === "open_dashboard")

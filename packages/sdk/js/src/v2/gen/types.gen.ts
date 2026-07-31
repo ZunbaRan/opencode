@@ -2380,6 +2380,14 @@ export type FormatterStatus = {
 
 export type McpStatusConnected = {
   status: "connected"
+  protocolVersion?: string
+  era: "legacy" | "2026-07-28"
+  adapter: "legacy-sdk" | "2026-sdk"
+  apps: {
+    client: boolean
+    server: boolean
+    negotiated: boolean
+  }
 }
 
 export type McpStatusDisabled = {
@@ -2419,15 +2427,11 @@ export type McpServerNotFoundError = {
 
 export type McpAppMeta = {
   resourceUri: string
-  visibility?: Array<"model" | "app">
-  maxHeight?: number
-  prefersBorder?: boolean
-  domain?: string
-  csp?: {
-    [key: string]: unknown
-  }
-  permissions?: {
-    [key: string]: unknown
+  visibility: Array<"model" | "app">
+  preferred?: {
+    maxHeight?: number
+    border?: boolean
+    domain?: string
   }
 }
 
