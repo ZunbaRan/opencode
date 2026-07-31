@@ -909,6 +909,79 @@ it.instance("gets config directories", () =>
   }),
 )
 
+it.effect("loads OPENCODE_CONFIG_DIR config files in global precedence order", () =>
+  Effect.gen(function* () {
+    const project = yield* tmpdirScoped()
+    const configDir = yield* tmpdirScoped()
+    yield* writeConfigEffect(
+      configDir,
+      {
+        $schema: "https://opencode.ai/config.json",
+        model: "custom-config/model",
+        username: "config-json-user",
+        mcp: {
+          interop: {
+            type: "remote",
+            url: "https://config.example.com/mcp",
+            enabled: false,
+            headers: {
+              "X-Config-Source": "config.json",
+            },
+          },
+        },
+      },
+      "config.json",
+    )
+    yield* writeConfigEffect(
+      configDir,
+      {
+        $schema: "https://opencode.ai/config.json",
+        model: "custom-json/model",
+        mcp: {
+          interop: {
+            type: "remote",
+            url: "https://config.example.com/mcp",
+            enabled: false,
+          },
+        },
+      },
+      "opencode.json",
+    )
+    yield* writeConfigEffect(
+      configDir,
+      {
+        $schema: "https://opencode.ai/config.json",
+        model: "custom-jsonc/model",
+        mcp: {
+          interop: {
+            type: "remote",
+            url: "https://config.example.com/mcp",
+            enabled: true,
+          },
+        },
+      },
+      "opencode.jsonc",
+    )
+
+    const config = yield* withProcessEnv(
+      "OPENCODE_CONFIG_DIR",
+      configDir,
+      Config.use.get().pipe(provideInstanceEffect(project)),
+    )
+
+    expect(config.model).toBe("custom-jsonc/model")
+    expect(config.username).toBe("config-json-user")
+    expect(config.mcp?.interop).toEqual({
+      type: "remote",
+      url: "https://config.example.com/mcp",
+      enabled: true,
+      headers: {
+        "X-Config-Source": "config.json",
+      },
+    })
+  }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
+)
+
 it.effect("does not try to install dependencies in read-only OPENCODE_CONFIG_DIR", () =>
   Effect.gen(function* () {
     if (process.platform === "win32") return

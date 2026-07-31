@@ -422,15 +422,20 @@ const layer = Layer.effect(
         const deps: Fiber.Fiber<void>[] = []
 
         for (const dir of directories) {
-          if (dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
-            for (const file of ["opencode.json", "opencode.jsonc"]) {
-              const source = path.join(dir, file)
-              yield* Effect.logDebug(`loading config from ${source}`)
-              yield* merge(source, yield* loadFile(source, authEnv))
-              result.agent ??= {}
-              result.mode ??= {}
-              result.plugin ??= []
-            }
+          // loadGlobal already consumed all three files when the custom path aliases the global config directory.
+          const files =
+            dir === Flag.OPENCODE_CONFIG_DIR && path.resolve(dir) !== path.resolve(Global.Path.config)
+              ? ["config.json", "opencode.json", "opencode.jsonc"]
+              : dir.endsWith(".opencode")
+                ? ["opencode.json", "opencode.jsonc"]
+                : []
+          for (const file of files) {
+            const source = path.join(dir, file)
+            yield* Effect.logDebug(`loading config from ${source}`)
+            yield* merge(source, yield* loadFile(source, authEnv))
+            result.agent ??= {}
+            result.mode ??= {}
+            result.plugin ??= []
           }
 
           yield* ensureGitignore(dir).pipe(Effect.orDie)
