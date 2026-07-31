@@ -13,6 +13,7 @@ import { withTimeout } from "@/util/timeout"
 
 export const MCP_APP_EXTENSION = "io.modelcontextprotocol/ui"
 export const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app"
+const CLOSE_TIMEOUT = 1_000
 
 const MCP_APP_CAPABILITY = {
   mimeTypes: [MCP_APP_MIME_TYPE],
@@ -136,8 +137,8 @@ function adapt(client: ModernClient, closeTransport: () => Promise<void>): Legac
         return async () => {
           // Abort the transport first so any timed-out request cannot keep
           // client.close() waiting for a response that will never arrive.
-          await closeTransport().catch(() => {})
-          await target.close().catch(() => {})
+          await withTimeout(closeTransport(), CLOSE_TIMEOUT, "Timed out closing MCP transport").catch(() => {})
+          await withTimeout(target.close(), CLOSE_TIMEOUT, "Timed out closing MCP client").catch(() => {})
         }
       }
       if (

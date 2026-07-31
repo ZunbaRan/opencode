@@ -20,6 +20,7 @@ import { z } from "zod"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 import { MCP } from "../../src/mcp/index"
 import { McpOAuthCallback } from "../../src/mcp/oauth-callback"
+import { withTimeout } from "../../src/util/timeout"
 import { TestInstance } from "../fixture/fixture"
 import { pollWithTimeout, testEffect } from "../lib/effect"
 
@@ -151,8 +152,12 @@ function lifecycleServer(input?: { capabilities?: ServerCapabilities; instructio
           current = await makeProtocol()
         },
         close: async () => {
-          await current.protocol.close().catch(() => {})
-          await http.stop(true)
+          await withTimeout(
+            Promise.resolve(http.stop(true)),
+            1_000,
+            "Timed out stopping MCP test server",
+          ).catch(() => {})
+          await withTimeout(current.protocol.close(), 1_000, "Timed out closing MCP test protocol").catch(() => {})
         },
       }
     }),
@@ -197,8 +202,12 @@ function hangingLifecycleServer() {
         aborted: () => aborted,
         url: http.url.toString(),
         close: async () => {
-          await protocol.close().catch(() => {})
-          await http.stop(true)
+          await withTimeout(
+            Promise.resolve(http.stop(true)),
+            1_000,
+            "Timed out stopping MCP test server",
+          ).catch(() => {})
+          await withTimeout(protocol.close(), 1_000, "Timed out closing MCP test protocol").catch(() => {})
         },
       }
     }),
@@ -593,6 +602,13 @@ it.instance("uses per-server timeouts for prompt and resource requests", () =>
 
     expect(yield* mcp.getPrompt("timeout-server", "test")).toBeUndefined()
     expect(yield* mcp.readResource("timeout-server", "test://resource")).toBeUndefined()
+
+    // The client correctly returns at the 50 ms deadline, but the fixture's
+    // delayed server handlers may still be completing in the background.
+    // Let them settle before closing the transport so a loaded CI runner does
+    // not spend the test's wall-clock budget unwinding in-flight requests.
+    yield* Effect.sleep("250 millis")
+    yield* mcp.disconnect("timeout-server")
   }),
   // The assertions prove the 50 ms per-request timeout itself. Leave enough
   // wall-clock budget for Bun/Effect fixture teardown on swap-heavy CI hosts.
