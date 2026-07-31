@@ -20,7 +20,6 @@ import { z } from "zod"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 import { MCP } from "../../src/mcp/index"
 import { McpOAuthCallback } from "../../src/mcp/oauth-callback"
-import { withTimeout } from "../../src/util/timeout"
 import { TestInstance } from "../fixture/fixture"
 import { pollWithTimeout, testEffect } from "../lib/effect"
 
@@ -60,6 +59,20 @@ function requestSupportsApps(context: unknown) {
   const extensions = asRecord(capabilities?.extensions)
   const app = asRecord(extensions?.[appExtension])
   return Array.isArray(app?.mimeTypes) && app.mimeTypes.includes(appMimeType)
+}
+
+async function settleOnRequestAbort(request: Request, handle: () => Promise<Response>) {
+  if (request.signal.aborted) return new Response("aborted", { status: 499 })
+  let onAbort: (() => void) | undefined
+  const aborted = new Promise<Response>((resolve) => {
+    onAbort = () => resolve(new Response("aborted", { status: 499 }))
+    request.signal.addEventListener("abort", onAbort, { once: true })
+  })
+  try {
+    return await Promise.race([handle(), aborted])
+  } finally {
+    if (onAbort) request.signal.removeEventListener("abort", onAbort)
+  }
 }
 
 function lifecycleServer(input?: { capabilities?: ServerCapabilities; instructions?: string; requestRoots?: boolean }) {
@@ -140,7 +153,7 @@ function lifecycleServer(input?: { capabilities?: ServerCapabilities; instructio
         fetch(request) {
           state.requests.push(request.method)
           request.signal.addEventListener("abort", () => state.aborted++)
-          return current.transport.handleRequest(request)
+          return settleOnRequestAbort(request, () => current.transport.handleRequest(request))
         },
       })
 
@@ -152,12 +165,8 @@ function lifecycleServer(input?: { capabilities?: ServerCapabilities; instructio
           current = await makeProtocol()
         },
         close: async () => {
-          await withTimeout(
-            Promise.resolve(http.stop(true)),
-            1_000,
-            "Timed out stopping MCP test server",
-          ).catch(() => {})
-          await withTimeout(current.protocol.close(), 1_000, "Timed out closing MCP test protocol").catch(() => {})
+          await current.protocol.close().catch(() => {})
+          await http.stop(true)
         },
       }
     }),
@@ -202,12 +211,8 @@ function hangingLifecycleServer() {
         aborted: () => aborted,
         url: http.url.toString(),
         close: async () => {
-          await withTimeout(
-            Promise.resolve(http.stop(true)),
-            1_000,
-            "Timed out stopping MCP test server",
-          ).catch(() => {})
-          await withTimeout(protocol.close(), 1_000, "Timed out closing MCP test protocol").catch(() => {})
+          await protocol.close().catch(() => {})
+          await http.stop(true)
         },
       }
     }),
@@ -602,13 +607,11 @@ it.instance("uses per-server timeouts for prompt and resource requests", () =>
 
     expect(yield* mcp.getPrompt("timeout-server", "test")).toBeUndefined()
     expect(yield* mcp.readResource("timeout-server", "test://resource")).toBeUndefined()
-
-    // The client correctly returns at the 50 ms deadline, but the fixture's
-    // delayed server handlers may still be completing in the background.
-    // Let them settle before closing the transport so a loaded CI runner does
-    // not spend the test's wall-clock budget unwinding in-flight requests.
-    yield* Effect.sleep("250 millis")
     yield* mcp.disconnect("timeout-server")
+    yield* pollWithTimeout(
+      Effect.sync(() => (server.state.aborted >= 2 ? server.state.aborted : undefined)),
+      "timed-out MCP requests were not aborted",
+    )
   }),
   // The assertions prove the 50 ms per-request timeout itself. Leave enough
   // wall-clock budget for Bun/Effect fixture teardown on swap-heavy CI hosts.
