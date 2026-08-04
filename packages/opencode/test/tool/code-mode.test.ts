@@ -349,13 +349,20 @@ describe("code mode execute", () => {
   })
 
   test("propagates an MCP tool error into the program as a catchable failure", async () => {
+    const result = {
+      isError: true,
+      content: [{ type: "text" as const, text: "server exploded" }],
+      structuredContent: { revision: 9, accepted: false },
+      _meta: { trace: "trace-safe" },
+    }
     const tool = await build({
-      bad_tool: mcpTool("tool", () => ({ isError: true, content: [{ type: "text", text: "server exploded" }] })),
+      bad_tool: mcpTool("tool", () => result),
     })
     const output = await Effect.runPromise(
       tool.execute({ code: "try { await tools.bad.tool({}) } catch (e) { return 'caught: ' + e.message }" }, ctx),
     )
     expect(output.output).toBe("caught: server exploded")
+    expect(output.metadata.toolCalls).toEqual([{ tool: "bad.tool", status: "error", result }])
   })
 
   test("asks permission before each child tool call", async () => {
@@ -463,7 +470,9 @@ describe("code mode execute", () => {
   })
 
   test("streams live per-call metadata as a call starts and finishes", async () => {
-    const snapshots: Array<{ toolCalls: { tool: string; status: string; input?: Record<string, unknown> }[] }> = []
+    const snapshots: Array<{
+      toolCalls: { tool: string; status: string; input?: Record<string, unknown>; result?: unknown }[]
+    }> = []
     const recordingCtx: Tool.Context = {
       ...ctx,
       metadata: (val: any) => Effect.sync(() => void snapshots.push(val.metadata)),
@@ -483,7 +492,9 @@ describe("code mode execute", () => {
   })
 
   test("marks a failed child call as error in the live metadata", async () => {
-    const snapshots: Array<{ toolCalls: { tool: string; status: string; input?: Record<string, unknown> }[] }> = []
+    const snapshots: Array<{
+      toolCalls: { tool: string; status: string; input?: Record<string, unknown>; result?: unknown }[]
+    }> = []
     const recordingCtx: Tool.Context = {
       ...ctx,
       metadata: (val: any) => Effect.sync(() => void snapshots.push(val.metadata)),
@@ -499,7 +510,16 @@ describe("code mode execute", () => {
       ),
     )
 
-    expect(snapshots).toContainEqual({ toolCalls: [{ tool: "bad.tool", status: "error", input: { reason: "test" } }] })
+    expect(snapshots).toContainEqual({
+      toolCalls: [
+        {
+          tool: "bad.tool",
+          status: "error",
+          input: { reason: "test" },
+          result: { isError: true, content: [{ type: "text", text: "boom" }] },
+        },
+      ],
+    })
   })
 
   test("accumulates stripped media as execute attachments the sandbox never sees", async () => {

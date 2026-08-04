@@ -2485,7 +2485,7 @@ export class App2 extends HeyApiClient {
   /**
    * Call an MCP App tool
    *
-   * Call an app-visible tool on the MCP server bound to the current session, message, and UI resource.
+   * Call an app-visible tool on the MCP server bound to the exact completed session ToolPart and UI resource.
    */
   public toolCall<ThrowOnError extends boolean = false>(
     parameters?: {
@@ -2493,8 +2493,10 @@ export class App2 extends HeyApiClient {
       workspace?: string
       sessionID?: string
       messageID?: string
+      partID?: string
       server?: string
       resourceUri?: string
+      toolKey?: string
       name?: string
       arguments?: {
         [key: string]: unknown
@@ -2511,8 +2513,10 @@ export class App2 extends HeyApiClient {
             { in: "query", key: "workspace" },
             { in: "body", key: "sessionID" },
             { in: "body", key: "messageID" },
+            { in: "body", key: "partID" },
             { in: "body", key: "server" },
             { in: "body", key: "resourceUri" },
+            { in: "body", key: "toolKey" },
             { in: "body", key: "name" },
             { in: "body", key: "arguments" },
           ],

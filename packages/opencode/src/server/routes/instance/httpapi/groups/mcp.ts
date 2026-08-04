@@ -3,7 +3,7 @@ import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import { McpServerNotFoundError } from "../errors"
-import { MessageID, SessionID } from "@/session/schema"
+import { MessageID, PartID, SessionID } from "@/session/schema"
 import { McpApp } from "@/mcp/app"
 import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
@@ -48,15 +48,19 @@ export const AppResourceQuery = Schema.Struct({
   ...WorkspaceRoutingQueryFields,
   sessionID: SessionID,
   messageID: MessageID,
+  partID: PartID,
   server: Schema.String,
   resourceUri: Schema.String,
+  toolKey: Schema.String,
   force: Schema.optional(QueryBoolean),
 })
 export const AppToolCallPayload = Schema.Struct({
   sessionID: SessionID,
   messageID: MessageID,
+  partID: PartID,
   server: Schema.String,
   resourceUri: Schema.String,
+  toolKey: Schema.String,
   name: Schema.String,
   arguments: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 })
@@ -207,7 +211,7 @@ export const McpApi = HttpApi.make("mcp")
             identifier: "mcp.app.tool-call",
             summary: "Call an MCP App tool",
             description:
-              "Call an app-visible tool on the MCP server bound to the current session, message, and UI resource.",
+              "Call an app-visible tool on the MCP server bound to the exact completed session ToolPart and UI resource.",
           }),
         ),
       )

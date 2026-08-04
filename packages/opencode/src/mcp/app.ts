@@ -1,7 +1,12 @@
 import type { Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
 import { Schema } from "effect"
 
-export const MAX_RESOURCE_BYTES = 4 * 1024 * 1024
+// Self-contained MCP Apps must carry every runtime asset inside the verified
+// HTML resource. The official tldraw v5.0.2 bundle is about 4.2 MiB, so keep a
+// bounded ceiling that admits real offline editors without allowing unbounded
+// resource allocation.
+export const MAX_RESOURCE_BYTES = 8 * 1024 * 1024
+const MAX_BASE64_RESOURCE_LENGTH = Math.ceil(MAX_RESOURCE_BYTES / 3) * 4
 
 export const Meta = Schema.Struct({
   resourceUri: Schema.String,
@@ -51,6 +56,7 @@ export function extract(def: MCPToolDef): Meta | undefined {
   if (!resourceUri?.startsWith("ui://")) return undefined
 
   const visibility = toolVisibility(def)
+  if (visibility.length === 0) return undefined
   // maxHeight is an OpenChamber compatibility hint. Security metadata such as
   // CSP and permissions belongs to the resources/read content item and is
   // deliberately ignored on tools/list.
@@ -87,12 +93,45 @@ export function resourceBytes(html: string) {
   return bytes
 }
 
-export function toolVisibility(def: MCPToolDef) {
+export function resourceContent(value: unknown): { html: string; bytes: Uint8Array } | undefined {
+  const content = asRecord(value)
+  if (!content) return undefined
+  const hasText = Object.prototype.hasOwnProperty.call(content, "text")
+  const hasBlob = Object.prototype.hasOwnProperty.call(content, "blob")
+  if (hasText === hasBlob) return undefined
+
+  if (hasText) {
+    if (typeof content.text !== "string") return undefined
+    const bytes = resourceBytes(content.text)
+    if (!bytes) return undefined
+    return { html: content.text, bytes }
+  }
+
+  if (typeof content.blob !== "string") return undefined
+  if (content.blob.length > MAX_BASE64_RESOURCE_LENGTH || !isBase64(content.blob)) return undefined
+  const bytes = Buffer.from(content.blob, "base64")
+  if (bytes.byteLength > MAX_RESOURCE_BYTES || bytes.toString("base64") !== content.blob) return undefined
+  try {
+    return {
+      html: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      bytes,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+export function toolVisibility(def: MCPToolDef): Array<"model" | "app"> {
   const metadata = asRecord(def._meta)
   const ui = asRecord(metadata?.ui)
-  if (!ui || !Array.isArray(ui.visibility)) return ["model", "app"] as const
-  const visibility = ui.visibility.filter((item): item is "model" | "app" => item === "model" || item === "app")
-  return visibility.length ? visibility : (["model", "app"] as const)
+  if (!ui || !("visibility" in ui)) return ["model", "app"]
+  if (!Array.isArray(ui.visibility) || ui.visibility.length === 0) return []
+  const visibility: Array<"model" | "app"> = []
+  for (const item of ui.visibility) {
+    if (item !== "model" && item !== "app") return []
+    if (!visibility.includes(item)) visibility.push(item)
+  }
+  return visibility
 }
 
 export function visibleToModel(def: MCPToolDef) {
@@ -121,14 +160,34 @@ export function callableFromResource(
   if (!options?.allowUnboundAppOnly) return false
   const metadata = asRecord(def._meta)
   const ui = asRecord(metadata?.ui)
-  if (!ui || !Array.isArray(ui.visibility)) return false
-  const visibility = ui.visibility.filter((item) => item === "model" || item === "app")
-  return visibility.includes("app") && !visibility.includes("model")
+  if (!ui || !("visibility" in ui)) return false
+  const visibility = toolVisibility(def)
+  return visibility.length === 1 && visibility[0] === "app"
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined
   return value as Record<string, unknown>
+}
+
+function isBase64(value: string) {
+  if (value.length % 4 !== 0) return false
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0
+  const contentLength = value.length - padding
+  for (let index = 0; index < contentLength; index++) {
+    const code = value.charCodeAt(index)
+    const valid =
+      (code >= 65 && code <= 90) ||
+      (code >= 97 && code <= 122) ||
+      (code >= 48 && code <= 57) ||
+      code === 43 ||
+      code === 47
+    if (!valid) return false
+  }
+  for (let index = contentLength; index < value.length; index++) {
+    if (value.charCodeAt(index) !== 61) return false
+  }
+  return true
 }
 
 function string(value: unknown): string | undefined {

@@ -8870,8 +8870,10 @@ export type McpAppToolCallData = {
   body?: {
     sessionID: string
     messageID: string
+    partID: string
     server: string
     resourceUri: string
+    toolKey: string
     name: string
     arguments?: {
       [key: string]: unknown

@@ -3,6 +3,7 @@ import {
   CallToolResultSchema,
   ListToolsResultSchema,
   ToolSchema,
+  type CallToolResult,
   type Tool as MCPToolDef,
 } from "@modelcontextprotocol/sdk/types.js"
 import { dynamicTool, jsonSchema, type JSONSchema7, type Tool } from "ai"
@@ -10,6 +11,40 @@ import { Effect } from "effect"
 
 const DEFAULT_TIMEOUT = 30_000
 const MAX_LIST_PAGES = 1_000
+
+export type CacheScope = "public" | "private"
+
+export interface CacheHints {
+  ttlMs?: number
+  cacheScope?: CacheScope
+}
+
+export interface ToolDefinitions extends CacheHints {
+  tools: MCPToolDef[]
+}
+
+/**
+ * A model-visible MCP refusal that still carries the protocol result for the host.
+ *
+ * Throwing keeps the provider's tool-failure semantics intact. Retaining the validated
+ * result lets session persistence and Code Mode preserve App state instead of collapsing
+ * an MCP error into one lossy message string.
+ */
+export class ToolResultError extends Error {
+  constructor(readonly result: CallToolResult) {
+    super(toolResultErrorMessage(result))
+    this.name = "McpToolResultError"
+  }
+}
+
+export function toolResultErrorMessage(result: CallToolResult) {
+  return (
+    result.content
+      .flatMap((item) => (item.type === "text" ? [item.text] : []))
+      .filter((text) => text.trim())
+      .join("\n\n") || "MCP tool returned an error"
+  )
+}
 
 const TolerantListToolsResultSchema = ListToolsResultSchema.extend({
   tools: ToolSchema.omit({ outputSchema: true }).array(),
@@ -19,24 +54,33 @@ export async function paginate<T, R extends { nextCursor?: string }>(
   list: (cursor?: string) => Promise<R>,
   items: (result: R) => T[],
 ) {
+  return (await paginateWithMetadata(list, items)).items
+}
+
+export async function paginateWithMetadata<T, R extends { nextCursor?: string }>(
+  list: (cursor?: string) => Promise<R>,
+  items: (result: R) => T[],
+) {
   const result: T[] = []
   const cursors = new Set<string>()
   let cursor: string | undefined
+  let hints: CacheHints | undefined
 
   for (let page = 0; page < MAX_LIST_PAGES; page++) {
-    const page = await list(cursor)
-    result.push(...items(page))
-    if (page.nextCursor === undefined) return result
-    if (cursors.has(page.nextCursor)) throw new Error(`MCP list returned duplicate cursor: ${page.nextCursor}`)
-    cursors.add(page.nextCursor)
-    cursor = page.nextCursor
+    const response = await list(cursor)
+    if (!hints) hints = cacheHints(response)
+    result.push(...items(response))
+    if (response.nextCursor === undefined) return { items: result, ...hints }
+    if (cursors.has(response.nextCursor)) throw new Error(`MCP list returned duplicate cursor: ${response.nextCursor}`)
+    cursors.add(response.nextCursor)
+    cursor = response.nextCursor
   }
 
   throw new Error(`MCP list exceeded ${MAX_LIST_PAGES} pages`)
 }
 
-export function defs(client: Client, timeout?: number) {
-  return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(Effect.catch(() => Effect.void))
+export function defs(client: Client, timeout?: number, force = false) {
+  return listTools(client, timeout ?? DEFAULT_TIMEOUT, force).pipe(Effect.catch(() => Effect.void))
 }
 
 export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: number): Tool {
@@ -65,13 +109,7 @@ export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: numbe
           onprogress: () => {},
         },
       )
-      if (result.isError)
-        throw new Error(
-          result.content
-            .flatMap((item) => (item.type === "text" ? [item.text] : []))
-            .filter((text) => text.trim())
-            .join("\n\n") || "MCP tool returned an error",
-        )
+      if (result.isError) throw new ToolResultError(result)
       if (result.content.length > 0 || result.structuredContent === undefined || result.structuredContent === null)
         return result
       return {
@@ -142,23 +180,47 @@ export function resourceTemplates(client: Client, timeout?: number) {
   )
 }
 
-function listTools(client: Client, timeout: number) {
+function listTools(client: Client, timeout: number, force: boolean) {
   return Effect.tryPromise({
     try: () =>
-      paginate(
+      paginateWithMetadata(
         async (cursor) => {
           const params = cursor === undefined ? undefined : { cursor }
+          const options = { timeout, ...(force ? { cacheMode: "refresh" as const } : {}) }
           try {
-            return await client.listTools(params, { timeout })
+            const list = client.listTools as unknown as (
+              params?: { cursor?: string },
+              options?: { timeout?: number; cacheMode?: "use" | "refresh" | "bypass" },
+            ) => Promise<Awaited<ReturnType<Client["listTools"]>>>
+            return await list.call(client, params, options)
           } catch (error) {
             if (!(error instanceof Error) || !isOutputSchemaValidationError(error)) throw error
-            return client.request({ method: "tools/list", params }, TolerantListToolsResultSchema, { timeout })
+            return client.request({ method: "tools/list", params }, TolerantListToolsResultSchema, options)
           }
         },
         (result) => result.tools,
       ),
     catch: (error) => (error instanceof Error ? error : new Error(String(error))),
-  })
+  }).pipe(
+    Effect.map(
+      (result): ToolDefinitions => ({
+        tools: result.items,
+        ...(result.ttlMs === undefined ? {} : { ttlMs: result.ttlMs }),
+        ...(result.cacheScope === undefined ? {} : { cacheScope: result.cacheScope }),
+      }),
+    ),
+  )
+}
+
+export function cacheHints(value: unknown): CacheHints {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {}
+  const result = value as Record<string, unknown>
+  return {
+    ...(typeof result.ttlMs === "number" && Number.isFinite(result.ttlMs) ? { ttlMs: result.ttlMs } : {}),
+    ...(result.cacheScope === "public" || result.cacheScope === "private"
+      ? { cacheScope: result.cacheScope }
+      : {}),
+  }
 }
 
 function isOutputSchemaValidationError(error: Error) {

@@ -23,6 +23,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { isRecord } from "@/util/record"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 
 const MCP_RESOURCE_TOOLS = {
   list: "list_mcp_resources",
@@ -37,6 +38,33 @@ const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
   "image/png",
   "image/webp",
 ])
+
+function mcpAppMetadata(app: MCP.McpTool["app"]) {
+  if (!app) return {}
+  return {
+    mcpApp: {
+      server: app.server,
+      tool: app.tool,
+      toolKey: app.toolKey,
+      resourceUri: app.meta.resourceUri,
+      meta: app.meta,
+    },
+  }
+}
+
+function mcpResultMetadata(result: CallToolResult) {
+  return {
+    mcpResult: {
+      content: result.content,
+      ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
+      ...(!("_meta" in result) || result._meta === undefined ? {} : { _meta: result._meta }),
+      ...(result.isError === undefined ? {} : { isError: result.isError }),
+    },
+    ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
+    ...(!("_meta" in result) || result._meta === undefined ? {} : { mcpResultMeta: result._meta }),
+    ...(result.isError ? { mcpIsError: true } : {}),
+  }
+}
 
 export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
@@ -387,11 +415,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
 
   if (flags.experimentalCodeMode) return tools
 
-  const mcpApps = yield* mcp.apps()
   for (const [key, entry] of Object.entries(yield* mcp.tools())) {
     const item = McpCatalog.convertTool(entry.def, entry.client, entry.timeout)
     const execute = item.execute
     if (!execute) continue
+    const appMetadata = mcpAppMetadata(entry.app)
 
     const schema = yield* Effect.promise(() => Promise.resolve(asSchema(item.inputSchema).jsonSchema))
     const transformed = ProviderTransform.schema(input.model, { ...schema, properties: schema.properties ?? {} })
@@ -405,10 +433,20 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
             { args },
           )
-          const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
-            yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
-            return yield* Effect.promise(() => execute(args, opts))
-          }).pipe(
+          const execution: { result: CallToolResult; error?: McpCatalog.ToolResultError } = yield* Effect.gen(
+            function* () {
+              yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
+              if (entry.app) yield* ctx.metadata({ title: "", metadata: appMetadata })
+              return yield* Effect.tryPromise({ try: () => execute(args, opts), catch: (error) => error }).pipe(
+                Effect.map((result) => ({ result: result as CallToolResult })),
+                Effect.catch((error) => {
+                  if (error instanceof McpCatalog.ToolResultError)
+                    return Effect.succeed({ result: error.result, error })
+                  return Effect.fail(error)
+                }),
+              )
+            },
+          ).pipe(
             Effect.withSpan("Tool.execute", {
               attributes: {
                 "tool.name": key,
@@ -418,6 +456,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               },
             }),
           )
+          const result = execution.result
           yield* plugin.trigger(
             "tool.execute.after",
             { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
@@ -436,8 +475,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               })
             } else if (contentItem.type === "resource") {
               const { resource } = contentItem
-              if (resource.text) textParts.push(resource.text)
-              if (resource.blob) {
+              if ("text" in resource && resource.text) textParts.push(resource.text)
+              if ("blob" in resource && resource.blob) {
                 const mime = resource.mimeType ?? "application/octet-stream"
                 const size = base64Size(resource.blob)
                 if (!SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES.has(mime)) {
@@ -462,22 +501,15 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
           }
 
-          const truncated = yield* truncate.output(textParts.join("\n\n"), {}, input.agent)
+          const truncated = yield* truncate.output(
+            textParts.join("\n\n") || (execution.error ? execution.error.message : ""),
+            {},
+            input.agent,
+          )
           const metadata = {
-            ...result.metadata,
-            ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
-            ...(!("_meta" in result) || result._meta === undefined ? {} : { mcpResultMeta: result._meta }),
-            ...(mcpApps[key]
-              ? {
-                  mcpApp: {
-                    server: mcpApps[key].server,
-                    tool: mcpApps[key].tool,
-                    toolKey: mcpApps[key].toolKey,
-                    resourceUri: mcpApps[key].meta.resourceUri,
-                    meta: mcpApps[key].meta,
-                  },
-                }
-              : {}),
+            ...(isRecord(result.metadata) ? result.metadata : {}),
+            ...mcpResultMetadata(result),
+            ...appMetadata,
             truncated: truncated.truncated,
             ...(truncated.truncated && { outputPath: truncated.outputPath }),
           }
@@ -493,6 +525,13 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               messageID: input.processor.message.id,
             })),
             content: result.content,
+          }
+          if (execution.error) {
+            // Persist the validated protocol result before the AI SDK emits its tool-error event.
+            // The later error event leaves this completed part intact, so Apps and history can
+            // reconstruct the refusal while the active model turn still receives a real failure.
+            yield* input.processor.completeToolCall(opts.toolCallId, output)
+            return yield* Effect.fail(execution.error)
           }
           if (opts.abortSignal?.aborted) {
             yield* input.processor.completeToolCall(opts.toolCallId, output)

@@ -39,6 +39,7 @@ interface LifecycleServerState {
   resourceTemplatePages?: Record<string, Page<{ name: string; uriTemplate: string; description?: string }>>
   listToolsError?: string
   requestDelay?: number
+  unavailable?: boolean
   roots?: Array<{ uri: string; name?: string }>
   requests: string[]
   aborted: number
@@ -153,6 +154,7 @@ function lifecycleServer(input?: { capabilities?: ServerCapabilities; instructio
         fetch(request) {
           state.requests.push(request.method)
           request.signal.addEventListener("abort", () => state.aborted++)
+          if (state.unavailable) return new Response("unavailable", { status: 503 })
           return settleOnRequestAbort(request, () => current.transport.handleRequest(request))
         },
       })
@@ -220,11 +222,35 @@ function hangingLifecycleServer() {
   )
 }
 
-function modernAppServer() {
+function modernAppServer(input?: {
+  toolsTtlMs?: number
+  resourceTtlMs?: number
+  advertiseApps?: boolean
+  toolName?: string
+  collidingToolName?: string
+  resourceMimeType?: string
+  resourceContentUri?: string
+  resourceBlob?: string
+  instructions?: string
+}) {
   return Effect.acquireRelease(
     Effect.sync(() => {
-      const state = { receivedAppsCapability: false }
-      const resourceUri = "ui://openchamber/remote-2026"
+      const state = {
+        receivedAppsCapability: false,
+        toolName: input?.toolName ?? "open_dashboard",
+        resourceUri: "ui://openchamber/remote-2026",
+        resourceHtml: "<!doctype html><html><body>remote 2026 app</body></html>",
+        resourceMimeType: input?.resourceMimeType ?? appMimeType,
+        resourceContentUri: input?.resourceContentUri,
+        resourceBlob: input?.resourceBlob,
+        listToolsRequests: 0,
+        listToolsError: undefined as string | undefined,
+        listToolsDelayMs: 0,
+        includePrimaryTool: true,
+        primaryVisibility: ["model", "app"] as Array<"model" | "app">,
+        readResourceRequests: 0,
+        appToolCalls: 0,
+      }
       const handler = createMcpHandler(
         () => {
           const server = new McpServer(
@@ -233,10 +259,23 @@ function modernAppServer() {
               capabilities: {
                 tools: {},
                 resources: {},
-                extensions: {
-                  [appExtension]: {},
-                },
+                ...(input?.advertiseApps === false
+                  ? {}
+                  : {
+                      extensions: {
+                        [appExtension]: {},
+                      },
+                    }),
               },
+              cacheHints: {
+                ...(input?.toolsTtlMs === undefined
+                  ? {}
+                  : { "tools/list": { ttlMs: input.toolsTtlMs, cacheScope: "private" } }),
+                ...(input?.resourceTtlMs === undefined
+                  ? {}
+                  : { "resources/read": { ttlMs: input.resourceTtlMs, cacheScope: "private" } }),
+              },
+              instructions: input?.instructions,
             },
           )
           const registerTool = server.registerTool.bind(server) as unknown as (
@@ -245,31 +284,33 @@ function modernAppServer() {
             callback: (input: unknown, context: unknown) => unknown,
           ) => unknown
 
-          registerTool(
-            "open_dashboard",
-            {
-              inputSchema: z.object({}),
-              _meta: {
-                ui: {
-                  resourceUri,
-                  visibility: ["model", "app"],
+          if (state.includePrimaryTool) {
+            registerTool(
+              state.toolName,
+              {
+                inputSchema: z.object({}),
+                _meta: {
+                  ui: {
+                    resourceUri: state.resourceUri,
+                    visibility: state.primaryVisibility,
+                  },
                 },
               },
-            },
-            async (_input, context) => {
-              const supported = requestSupportsApps(context)
-              state.receivedAppsCapability ||= supported
-              if (!supported) {
-                return {
-                  content: [{ type: "text" as const, text: "MCP App capability required; text fallback only." }],
+              async (_input, context) => {
+                const supported = requestSupportsApps(context)
+                state.receivedAppsCapability ||= supported
+                if (!supported) {
+                  return {
+                    content: [{ type: "text" as const, text: "MCP App capability required; text fallback only." }],
+                  }
                 }
-              }
-              return {
-                content: [{ type: "text" as const, text: "remote dashboard" }],
-                structuredContent: { revision: 1 },
-              }
-            },
-          )
+                return {
+                  content: [{ type: "text" as const, text: "remote dashboard" }],
+                  structuredContent: { revision: 1 },
+                }
+              },
+            )
+          }
 
           registerTool(
             "refresh_dashboard",
@@ -281,28 +322,73 @@ function modernAppServer() {
                 },
               },
             },
-            async () => ({ content: [{ type: "text" as const, text: "refreshed" }] }),
+            async () => {
+              state.appToolCalls++
+              return { content: [{ type: "text" as const, text: "refreshed" }] }
+            },
           )
 
-          server.registerResource("remote-dashboard", resourceUri, { mimeType: appMimeType }, async (uri) => ({
-            contents: [
-              {
-                uri: uri.href,
-                mimeType: appMimeType,
-                text: "<!doctype html><html><body>remote 2026 app</body></html>",
-              },
-            ],
-          }))
+          if (input?.collidingToolName) {
+            registerTool(
+              input.collidingToolName,
+              { inputSchema: z.object({}) },
+              async () => ({ content: [{ type: "text" as const, text: "ordinary collision" }] }),
+            )
+          }
+
+          server.registerResource(
+            "remote-dashboard",
+            state.resourceUri,
+            {
+              mimeType: appMimeType,
+              ...(input?.resourceTtlMs === undefined
+                ? {}
+                : { cacheHint: { ttlMs: input.resourceTtlMs, cacheScope: "private" as const } }),
+            },
+            async (uri) => {
+              state.readResourceRequests++
+              const identity = state.resourceContentUri ?? uri.href
+              return {
+                contents: [
+                  state.resourceBlob === undefined
+                    ? {
+                        uri: identity,
+                        mimeType: state.resourceMimeType,
+                        text: state.resourceHtml,
+                      }
+                    : {
+                        uri: identity,
+                        mimeType: state.resourceMimeType,
+                        blob: state.resourceBlob,
+                      },
+                ],
+              }
+            },
+          )
           return server
         },
         { legacy: "reject" },
       )
       const http = Bun.serve({
         port: 0,
-        fetch: (request) => handler.fetch(request),
+        async fetch(request) {
+          if (request.method === "POST") {
+            const body = await request
+              .clone()
+              .json()
+              .catch(() => undefined)
+            if (asRecord(body)?.method === "tools/list") {
+              state.listToolsRequests++
+              if (state.listToolsDelayMs > 0) await Bun.sleep(state.listToolsDelayMs)
+              if (state.listToolsError) return new Response(state.listToolsError, { status: 503 })
+            }
+          }
+          return handler.fetch(request)
+        },
       })
       return {
         url: http.url.toString(),
+        state,
         receivedAppsCapability: () => state.receivedAppsCapability,
         close: () => http.stop(true),
       }
@@ -338,6 +424,9 @@ it.instance("remote oauth:false negotiates strict MCP 2026 Apps and hides app-on
 
     const tools = yield* mcp.tools()
     expect(Object.keys(tools)).toEqual(["modern-app_open_dashboard"])
+    expect(tools["modern-app_open_dashboard"].app?.tool).toBe("open_dashboard")
+    expect(tools["modern-app_open_dashboard"].app?.server).toBe("modern-app")
+    expect(tools["modern-app_open_dashboard"].app?.meta.resourceUri).toBe("ui://openchamber/remote-2026")
     const opened = yield* Effect.promise(() =>
       tools["modern-app_open_dashboard"].client.callTool({
         name: "open_dashboard",
@@ -355,6 +444,282 @@ it.instance("remote oauth:false negotiates strict MCP 2026 Apps and hides app-on
     expect(
       yield* mcp.appToolCall("wrong-server", "ui://openchamber/remote-2026", "refresh_dashboard", {}),
     ).toBeUndefined()
+  }),
+)
+
+it.instance("does not register or expose Apps after replacement by a server without negotiation", () =>
+  Effect.gen(function* () {
+    const negotiated = yield* modernAppServer({ toolsTtlMs: 10_000 })
+    const server = yield* modernAppServer({ advertiseApps: false, toolsTtlMs: 10_000 })
+    const mcp = yield* MCP.Service
+    yield* mcp.add("modern-no-apps", remote(negotiated.url))
+    expect((yield* mcp.apps())["modern-no-apps_open_dashboard"]).toBeDefined()
+    expect(yield* mcp.appResource("modern-no-apps", negotiated.state.resourceUri)).toBeDefined()
+
+    yield* mcp.add("modern-no-apps", remote(server.url))
+
+    expect((yield* mcp.status())["modern-no-apps"]).toMatchObject({
+      status: "connected",
+      apps: { client: true, server: false, negotiated: false },
+    })
+    const tools = yield* mcp.tools()
+    expect(tools["modern-no-apps_open_dashboard"]?.def.name).toBe("open_dashboard")
+    expect(tools["modern-no-apps_open_dashboard"]?.app).toBeUndefined()
+    expect(yield* mcp.apps()).toEqual({})
+    expect(yield* mcp.appResource("modern-no-apps", server.state.resourceUri)).toBeUndefined()
+    expect(
+      yield* mcp.appToolCall("modern-no-apps", server.state.resourceUri, "refresh_dashboard", {}),
+    ).toBeUndefined()
+    expect(server.state.readResourceRequests).toBe(0)
+    expect(server.state.appToolCalls).toBe(0)
+  }),
+)
+
+it.instance("keeps legacy metadata-advertised MCP Apps without 2026 capability negotiation", () =>
+  Effect.gen(function* () {
+    const server = yield* lifecycleServer({ capabilities: { tools: {}, resources: {} } })
+    server.state.tools = [
+      {
+        name: "open_legacy_dashboard",
+        description: "Open the legacy dashboard App",
+        inputSchema: { type: "object", properties: {} },
+        _meta: { "ui/resourceUri": "ui://legacy/dashboard" },
+      },
+    ]
+    const mcp = yield* MCP.Service
+    yield* mcp.add("legacy-app", remote(server.url))
+
+    expect((yield* mcp.status())["legacy-app"]).toMatchObject({
+      status: "connected",
+      era: "legacy",
+      apps: { negotiated: false },
+    })
+    const tools = yield* mcp.tools()
+    expect(tools["legacy-app_open_legacy_dashboard"]?.app?.meta.resourceUri).toBe(
+      "ui://legacy/dashboard",
+    )
+    expect((yield* mcp.apps())["legacy-app_open_legacy_dashboard"]?.tool).toBe(
+      "open_legacy_dashboard",
+    )
+  }),
+)
+
+it.instance("requires exact App resource URI and MIME identity while accepting strict blob content", () =>
+  Effect.gen(function* () {
+    const wrongUri = yield* modernAppServer({ resourceContentUri: "ui://openchamber/wrong" })
+    const wrongMime = yield* modernAppServer({ resourceMimeType: "text/html" })
+    const blobHtml = "<!doctype html><html><body>blob app</body></html>"
+    const blob = yield* modernAppServer({ resourceBlob: Buffer.from(blobHtml).toString("base64") })
+    const mcp = yield* MCP.Service
+
+    yield* mcp.add("wrong-uri", remote(wrongUri.url))
+    yield* mcp.add("wrong-mime", remote(wrongMime.url))
+    yield* mcp.add("strict-blob", remote(blob.url))
+
+    expect(yield* mcp.appResource("wrong-uri", wrongUri.state.resourceUri, true)).toBeUndefined()
+    expect(yield* mcp.appResource("wrong-mime", wrongMime.state.resourceUri, true)).toBeUndefined()
+    const resource = yield* mcp.appResource("strict-blob", blob.state.resourceUri, true)
+    expect(resource).toMatchObject({
+      resourceUri: blob.state.resourceUri,
+      mimeType: appMimeType,
+      html: blobHtml,
+    })
+    expect(resource?.sha256).toBe(new Bun.CryptoHasher("sha256").update(Buffer.from(blobHtml)).digest("hex"))
+  }),
+)
+
+it.instance("rejects normalized tool-key collisions within one server", () =>
+  Effect.gen(function* () {
+    const server = yield* modernAppServer({
+      toolsTtlMs: 10_000,
+      toolName: "open.dashboard",
+      collidingToolName: "open_dashboard",
+      instructions: "Open the dashboard before refreshing it.",
+    })
+    const mcp = yield* MCP.Service
+    yield* mcp.add("same-server-collision", remote(server.url))
+
+    expect(yield* mcp.tools()).toEqual({})
+    expect(yield* mcp.apps()).toEqual({})
+    expect(yield* mcp.instructions()).toEqual([
+      {
+        name: "same-server-collision",
+        instructions: "Open the dashboard before refreshing it.",
+        tools: [],
+      },
+    ])
+    expect(yield* mcp.appResource("same-server-collision", server.state.resourceUri)).toBeUndefined()
+  }),
+)
+
+it.instance("rejects normalized tool-key collisions across servers", () =>
+  Effect.gen(function* () {
+    const app = yield* modernAppServer({ toolsTtlMs: 10_000 })
+    const ordinary = yield* lifecycleServer({ capabilities: { tools: {} } })
+    ordinary.state.tools = [
+      { name: "open_dashboard", inputSchema: { type: "object", properties: {} } },
+    ]
+    const mcp = yield* MCP.Service
+    yield* mcp.add("server.one", remote(app.url))
+    expect(yield* mcp.appResource("server.one", app.state.resourceUri)).toBeDefined()
+    yield* mcp.add("server_one", remote(ordinary.url))
+
+    expect(yield* mcp.tools()).toEqual({})
+    expect(yield* mcp.apps()).toEqual({})
+    expect(yield* mcp.appResource("server.one", app.state.resourceUri)).toBeUndefined()
+  }),
+)
+
+it.instance("strict MCP 2026 ttl 0 refreshes mutable tool and App definitions without reconnecting", () =>
+  Effect.gen(function* () {
+    const server = yield* modernAppServer({ toolsTtlMs: 0 })
+    const mcp = yield* MCP.Service
+    yield* mcp.add("modern-mutable", remote(server.url))
+
+    const before = server.state.listToolsRequests
+    server.state.toolName = "open_reports"
+    server.state.resourceUri = "ui://openchamber/reports-2026"
+
+    expect(Object.keys(yield* mcp.tools())).toEqual(["modern-mutable_open_reports"])
+    expect(server.state.listToolsRequests).toBeGreaterThan(before)
+    expect((yield* mcp.apps())["modern-mutable_open_reports"]?.meta.resourceUri).toBe(
+      "ui://openchamber/reports-2026",
+    )
+    expect((yield* mcp.status())["modern-mutable"]?.status).toBe("connected")
+  }),
+)
+
+it.instance("strict MCP 2026 reuses positive tool TTL and refreshes after expiry", () =>
+  Effect.gen(function* () {
+    const server = yield* modernAppServer({ toolsTtlMs: 1_000 })
+    const mcp = yield* MCP.Service
+    yield* mcp.add("modern-positive-ttl", remote(server.url))
+
+    const before = server.state.listToolsRequests
+    server.state.toolName = "open_reports"
+    expect(Object.keys(yield* mcp.tools())).toEqual(["modern-positive-ttl_open_dashboard"])
+    expect(server.state.listToolsRequests).toBe(before)
+
+    yield* Effect.sleep("1100 millis")
+    expect(Object.keys(yield* mcp.tools())).toEqual(["modern-positive-ttl_open_reports"])
+    expect(server.state.listToolsRequests).toBeGreaterThan(before)
+  }),
+)
+
+it.instance("strict MCP 2026 quarantines stale model tools and Apps when an expired catalog cannot refresh", () =>
+  Effect.gen(function* () {
+    const server = yield* modernAppServer({ toolsTtlMs: 0 })
+    const mcp = yield* MCP.Service
+    yield* mcp.add("modern-fail-closed", remote(server.url))
+
+    expect(Object.keys(yield* mcp.tools())).toEqual(["modern-fail-closed_open_dashboard"])
+    expect((yield* mcp.apps())["modern-fail-closed_open_dashboard"]).toBeDefined()
+
+    server.state.primaryVisibility = ["app"]
+    expect(yield* mcp.tools()).toEqual({})
+    expect((yield* mcp.apps())["modern-fail-closed_open_dashboard"]).toBeDefined()
+
+    server.state.includePrimaryTool = false
+    expect(yield* mcp.apps()).toEqual({})
+
+    server.state.includePrimaryTool = true
+    server.state.primaryVisibility = ["model", "app"]
+    server.state.toolName = "restored_dashboard"
+    expect(Object.keys(yield* mcp.tools())).toEqual(["modern-fail-closed_restored_dashboard"])
+    expect((yield* mcp.apps())["modern-fail-closed_restored_dashboard"]).toBeDefined()
+
+    server.state.listToolsError = "catalog unavailable"
+    expect(yield* mcp.tools()).toEqual({})
+    expect(yield* mcp.apps()).toEqual({})
+    expect((yield* mcp.status())["modern-fail-closed"]?.status).toBe("connected")
+    expect(
+      yield* mcp.appResource("modern-fail-closed", server.state.resourceUri),
+    ).toBeUndefined()
+
+    server.state.listToolsError = undefined
+    server.state.toolName = "recovered_dashboard"
+    expect(Object.keys(yield* mcp.tools())).toEqual(["modern-fail-closed_recovered_dashboard"])
+    expect((yield* mcp.apps())["modern-fail-closed_recovered_dashboard"]).toBeDefined()
+  }),
+)
+
+it.instance("strict MCP 2026 coalesces concurrent catalog refreshes and keeps the newest generation", () =>
+  Effect.gen(function* () {
+    const server = yield* modernAppServer({
+      toolsTtlMs: 0,
+      instructions: "Open the dashboard before refreshing it.",
+    })
+    const mcp = yield* MCP.Service
+    yield* mcp.add("modern-singleflight", remote(server.url))
+
+    const before = server.state.listToolsRequests
+    server.state.toolName = "open_reports"
+    server.state.listToolsDelayMs = 100
+    const [tools, apps, instructions] = yield* Effect.all(
+      [mcp.tools(), mcp.apps(), mcp.instructions()],
+      { concurrency: "unbounded" },
+    )
+
+    expect(server.state.listToolsRequests).toBe(before + 1)
+    expect(Object.keys(tools)).toEqual(["modern-singleflight_open_reports"])
+    expect(apps["modern-singleflight_open_reports"]?.tool).toBe("open_reports")
+    expect(instructions).toEqual([
+      {
+        name: "modern-singleflight",
+        instructions: "Open the dashboard before refreshing it.",
+        tools: ["modern-singleflight_open_reports"],
+      },
+    ])
+  }),
+)
+
+it.instance("strict MCP 2026 ignores an older in-flight catalog refresh after server replacement", () =>
+  Effect.gen(function* () {
+    const oldServer = yield* modernAppServer({ toolsTtlMs: 0, toolName: "old_dashboard" })
+    const newServer = yield* modernAppServer({ toolsTtlMs: 10_000, toolName: "new_dashboard" })
+    const mcp = yield* MCP.Service
+    yield* mcp.add("modern-generation", remote(oldServer.url))
+
+    const before = oldServer.state.listToolsRequests
+    oldServer.state.listToolsDelayMs = 200
+    const [tools] = yield* Effect.all(
+      [
+        mcp.tools(),
+        pollWithTimeout(
+          Effect.sync(() => (oldServer.state.listToolsRequests > before ? true : undefined)),
+          "old catalog refresh did not start",
+        ).pipe(Effect.andThen(mcp.add("modern-generation", remote(newServer.url)))),
+      ],
+      { concurrency: "unbounded" },
+    )
+
+    expect(Object.keys(tools)).toEqual(["modern-generation_new_dashboard"])
+    expect(Object.keys(yield* mcp.tools())).toEqual(["modern-generation_new_dashboard"])
+    expect((yield* mcp.apps())["modern-generation_new_dashboard"]?.tool).toBe("new_dashboard")
+  }),
+)
+
+it.instance("strict MCP 2026 honors resource read TTL and force refresh", () =>
+  Effect.gen(function* () {
+    const server = yield* modernAppServer({ toolsTtlMs: 10_000, resourceTtlMs: 500 })
+    const mcp = yield* MCP.Service
+    yield* mcp.add("modern-resource-ttl", remote(server.url))
+
+    const uri = server.state.resourceUri
+    const first = yield* mcp.appResource("modern-resource-ttl", uri)
+    expect(first?.html).toContain("remote 2026 app")
+    const reads = server.state.readResourceRequests
+
+    server.state.resourceHtml = "<!doctype html><html><body>updated after ttl</body></html>"
+    expect((yield* mcp.appResource("modern-resource-ttl", uri))?.html).toContain("remote 2026 app")
+    expect(server.state.readResourceRequests).toBe(reads)
+
+    yield* Effect.sleep("600 millis")
+    expect((yield* mcp.appResource("modern-resource-ttl", uri))?.html).toContain("updated after ttl")
+    expect(server.state.readResourceRequests).toBeGreaterThan(reads)
+
+    server.state.resourceHtml = "<!doctype html><html><body>forced refresh</body></html>"
+    expect((yield* mcp.appResource("modern-resource-ttl", uri, true))?.html).toContain("forced refresh")
   }),
 )
 
@@ -662,6 +1027,49 @@ it.instance("unavailable remote server is marked failed without tools", () =>
 
     expect((yield* mcp.status()).unavailable?.status).toBe("failed")
     expect(yield* mcp.tools()).toEqual({})
+  }),
+)
+
+it.instance("reconnects an enabled remote server after a transient startup failure", () =>
+  Effect.gen(function* () {
+    const server = yield* lifecycleServer()
+    server.state.unavailable = true
+    const mcp = yield* MCP.Service
+    yield* mcp.add("startup-retry", remote(server.url, 1_000))
+
+    expect((yield* mcp.status())["startup-retry"]?.status).toBe("failed")
+    expect(yield* mcp.tools()).toEqual({})
+
+    server.state.unavailable = false
+    yield* pollWithTimeout(
+      Effect.gen(function* () {
+        const status = (yield* mcp.status())["startup-retry"]
+        return status?.status === "connected" ? true : undefined
+      }),
+      "remote MCP did not reconnect after the endpoint recovered",
+      "8 seconds",
+    )
+
+    expect(Object.keys(yield* mcp.tools())).toEqual(["startup-retry_test_tool"])
+  }),
+)
+
+it.instance("manual disconnect cancels a pending remote reconnect", () =>
+  Effect.gen(function* () {
+    const server = yield* lifecycleServer()
+    server.state.unavailable = true
+    const mcp = yield* MCP.Service
+    yield* mcp.add("manual-stop", remote(server.url, 200))
+    expect((yield* mcp.status())["manual-stop"]?.status).toBe("failed")
+
+    yield* mcp.disconnect("manual-stop")
+    const requestsAfterDisconnect = server.state.requests.length
+    server.state.unavailable = false
+    yield* Effect.sleep("2 seconds")
+
+    expect((yield* mcp.status())["manual-stop"]?.status).toBe("disabled")
+    expect(yield* mcp.tools()).toEqual({})
+    expect(server.state.requests).toHaveLength(requestsAfterDisconnect)
   }),
 )
 

@@ -138,12 +138,69 @@ describe("MCP App metadata", () => {
     expect(McpApp.callableFromResource(boundElsewhere, "ui://acme/dashboard")).toBe(false)
   })
 
-  test("accepts self-contained App resources up to four MiB", () => {
-    const tldrawBundle = McpApp.resourceBytes("a".repeat(2_346_676))
-    expect(tldrawBundle?.byteLength).toBe(2_346_676)
+  test("fails closed for explicit empty or malformed visibility", () => {
+    for (const visibility of [[], ["admin"], ["model", "admin"], null, "app"]) {
+      const definition = tool({
+        ui: {
+          resourceUri: "ui://acme/dashboard",
+          visibility,
+        },
+      })
+      expect(McpApp.toolVisibility(definition)).toEqual([])
+      expect(McpApp.visibleToModel(definition)).toBe(false)
+      expect(McpApp.visibleToApp(definition)).toBe(false)
+      expect(McpApp.extract(definition)).toBeUndefined()
+    }
+
+    const malformedUnbound = tool({ ui: { visibility: ["app", "admin"] } })
+    expect(
+      McpApp.callableFromResource(malformedUnbound, "ui://acme/dashboard", {
+        allowUnboundAppOnly: true,
+      }),
+    ).toBe(false)
+  })
+
+  test("defaults omitted visibility to model and app", () => {
+    const definition = tool({ ui: { resourceUri: "ui://acme/dashboard" } })
+    expect(McpApp.toolVisibility(definition)).toEqual(["model", "app"])
+    expect(McpApp.extract(definition)?.visibility).toEqual(["model", "app"])
+  })
+
+  test("accepts self-contained App resources up to eight MiB", () => {
+    const tldrawBundleBytes = 4_372_695
+    const tldrawBundle = McpApp.resourceBytes("a".repeat(tldrawBundleBytes))
+    expect(tldrawBundle?.byteLength).toBe(tldrawBundleBytes)
     expect(McpApp.resourceBytes("a".repeat(McpApp.MAX_RESOURCE_BYTES))?.byteLength).toBe(
       McpApp.MAX_RESOURCE_BYTES,
     )
     expect(McpApp.resourceBytes("a".repeat(McpApp.MAX_RESOURCE_BYTES + 1))).toBeUndefined()
+  })
+
+  test("accepts exactly one text or strict base64 blob representation", () => {
+    const html = "<!doctype html><p>你好</p>"
+    const text = McpApp.resourceContent({ text: html })
+    expect(text?.html).toBe(html)
+    expect(text?.bytes.byteLength).toBe(Buffer.byteLength(html))
+
+    const blob = Buffer.from(html).toString("base64")
+    const decoded = McpApp.resourceContent({ blob })
+    expect(decoded?.html).toBe(html)
+    expect(Buffer.from(decoded?.bytes ?? []).toString("base64")).toBe(blob)
+
+    expect(McpApp.resourceContent({ text: html, blob })).toBeUndefined()
+    expect(McpApp.resourceContent({})).toBeUndefined()
+    expect(McpApp.resourceContent({ text: 1 })).toBeUndefined()
+  })
+
+  test("rejects malformed base64, invalid UTF-8, and blobs over the decoded limit", () => {
+    for (const blob of ["SGVsbG8", "SGVsbG8===", "SGVs bG8=", "SGVsbG8_", "===="]) {
+      expect(McpApp.resourceContent({ blob })).toBeUndefined()
+    }
+    expect(McpApp.resourceContent({ blob: Buffer.from([0xff]).toString("base64") })).toBeUndefined()
+
+    const atLimit = Buffer.alloc(McpApp.MAX_RESOURCE_BYTES, 0x61).toString("base64")
+    expect(McpApp.resourceContent({ blob: atLimit })?.bytes.byteLength).toBe(McpApp.MAX_RESOURCE_BYTES)
+    const overLimit = Buffer.alloc(McpApp.MAX_RESOURCE_BYTES + 1, 0x61).toString("base64")
+    expect(McpApp.resourceContent({ blob: overLimit })).toBeUndefined()
   })
 })

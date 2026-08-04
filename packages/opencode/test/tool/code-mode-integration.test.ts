@@ -111,7 +111,12 @@ function handleCall(name: string, args: Record<string, unknown>) {
     case "screenshot":
       return { content: [{ type: "image", data: PNG, mimeType: "image/png" }] }
     case "boom":
-      return { content: [{ type: "text", text: "kaboom" }], isError: true }
+      return {
+        content: [{ type: "text", text: "kaboom" }],
+        structuredContent: { revision: 3, accepted: false },
+        _meta: { trace: "trace-safe" },
+        isError: true,
+      }
     default:
       return { content: [{ type: "text", text: `unknown tool ${name}` }], isError: true }
   }
@@ -254,6 +259,18 @@ describe("code mode integration (real MCP server)", () => {
   test("propagates an MCP isError into the program as a catchable error", async () => {
     const out = await run("try { await tools.fixtures.boom({}) } catch (e) { return 'caught: ' + e.message }")
     expect(out.output).toBe("caught: kaboom")
+    expect(out.metadata.toolCalls).toEqual([
+      {
+        tool: "fixtures.boom",
+        status: "error",
+        result: {
+          content: [{ type: "text", text: "kaboom" }],
+          structuredContent: { revision: 3, accepted: false },
+          _meta: { trace: "trace-safe" },
+          isError: true,
+        },
+      },
+    ])
   })
 
   test("an uncaught MCP error surfaces as a failed execution", async () => {

@@ -104,6 +104,21 @@ serveStdio(
     )
 
     registerTool(
+      "model_only_status",
+      {
+        title: "Model-only status",
+        inputSchema: z.object({}),
+        _meta: {
+          ui: {
+            resourceUri,
+            visibility: ["model"],
+          },
+        },
+      },
+      async () => ({ content: [{ type: "text" as const, text: "model only" }] }),
+    )
+
+    registerTool(
       "ambiguous_app_helper",
       {
         title: "Ambiguous app helper",

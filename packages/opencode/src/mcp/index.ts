@@ -23,7 +23,7 @@ import { McpOAuthCallback } from "./oauth-callback"
 import { McpAuth } from "./auth"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
-import { Cause, Effect, Exit, Layer, Context, Schema, Stream } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Context, Schema, Scope, Semaphore, Stream } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
@@ -37,10 +37,14 @@ import {
   connectModernRemote,
   createLegacyClient,
   describeLegacyClient,
+  MCP_APP_MIME_TYPE,
   type McpConnection,
 } from "./connection-adapter"
 
 const DEFAULT_TIMEOUT = 30_000
+const MAX_CACHE_TTL_MS = 24 * 60 * 60_000
+const REMOTE_RECONNECT_DELAYS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const
+const REMOTE_RECONNECT_CONCURRENCY = 2
 
 export const Resource = Schema.Struct({
   name: Schema.String,
@@ -135,7 +139,7 @@ function remoteURL(value: string) {
 interface CreateResult {
   mcpClient?: MCPClient
   status: Status
-  defs?: MCPToolDef[]
+  defs?: McpCatalog.ToolDefinitions
   instructions?: string
 }
 
@@ -152,33 +156,111 @@ interface State {
   status: Record<string, Status>
   clients: Record<string, MCPClient>
   defs: Record<string, MCPToolDef[]>
+  definitionFreshness: Record<
+    string,
+    { client: MCPClient; expiresAt: number; scope: McpCatalog.CacheScope }
+  >
+  definitionGeneration: Record<string, number>
+  definitionPermits: Map<string, Semaphore.Semaphore>
   apps: Record<string, McpApp.Definition>
-  appResources: Map<string, { value: McpApp.Resource; expiresAt: number }>
+  appResources: Map<
+    string,
+    {
+      value: McpApp.Resource
+      expiresAt: number
+      scope: McpCatalog.CacheScope
+      client: MCPClient
+      directory: string
+    }
+  >
   instructions: Record<string, string>
+  bridge: EffectBridge.Shape
+  retryFibers: Record<string, Fiber.Fiber<void>>
+  retryGeneration: Record<string, number>
+  connectionPermits: Map<string, Semaphore.Semaphore>
+  scope: Scope.Scope
+  disposed: boolean
 }
 
-function removeApps(state: State, server: string) {
-  state.apps = Object.fromEntries(Object.entries(state.apps).filter(([, app]) => app.server !== server))
-  for (const key of state.appResources.keys()) {
-    if (key.startsWith(`${server}\u0000`)) state.appResources.delete(key)
-  }
-}
-
-function storeApps(state: State, server: string, defs: MCPToolDef[]) {
-  removeApps(state, server)
-  for (const def of defs) {
-    const meta = McpApp.extract(def)
-    if (!meta) continue
-    const toolKey = McpCatalog.toolName(server, def.name)
-    state.apps[toolKey] = {
-      server,
-      tool: def.name,
-      toolKey,
-      title: def.title ?? def.name,
-      description: def.description,
-      meta,
+function collidingToolKeys(state: State) {
+  const counts = new Map<string, number>()
+  for (const [server, defs] of Object.entries(state.defs)) {
+    if (!state.clients[server] || state.status[server]?.status !== "connected") continue
+    for (const def of defs) {
+      const key = McpCatalog.toolName(server, def.name)
+      counts.set(key, (counts.get(key) ?? 0) + 1)
     }
   }
+  return new Set([...counts].filter(([, count]) => count > 1).map(([key]) => key))
+}
+
+function rebuildApps(state: State) {
+  const collisions = collidingToolKeys(state)
+  const next: Record<string, McpApp.Definition> = {}
+  const resources = new Set<string>()
+
+  for (const [server, defs] of Object.entries(state.defs)) {
+    const status = state.status[server]
+    if (!state.clients[server] || status?.status !== "connected") continue
+    // Strict 2026 servers must explicitly negotiate the Apps extension. Legacy
+    // MCP servers predate that capability exchange and advertise Apps through
+    // their validated tool/resource metadata instead (for example the official
+    // Excalidraw MCP App). Applying the 2026 gate to legacy connections silently
+    // downgraded those Apps to ordinary tool output.
+    if (status.era === "2026-07-28" && !status.apps.negotiated) continue
+    for (const def of defs) {
+      const toolKey = McpCatalog.toolName(server, def.name)
+      if (collisions.has(toolKey)) continue
+      const meta = McpApp.extract(def)
+      if (!meta) continue
+      next[toolKey] = {
+        server,
+        tool: def.name,
+        toolKey,
+        title: def.title ?? def.name,
+        description: def.description,
+        meta,
+      }
+      resources.add(`${server}\u0000${meta.resourceUri}`)
+    }
+  }
+
+  state.apps = next
+  for (const key of state.appResources.keys()) {
+    if (!resources.has(key)) state.appResources.delete(key)
+  }
+}
+
+function storeDefinitions(
+  state: State,
+  server: string,
+  client: MCPClient,
+  status: Status,
+  catalog: McpCatalog.ToolDefinitions,
+) {
+  state.defs[server] = catalog.tools
+  state.definitionGeneration[server] = (state.definitionGeneration[server] ?? 0) + 1
+  rebuildApps(state)
+  if (status.status !== "connected" || status.era !== "2026-07-28") {
+    delete state.definitionFreshness[server]
+    return
+  }
+  state.definitionFreshness[server] = {
+    client,
+    expiresAt:
+      Date.now() + Math.min(Math.max(0, Number.isFinite(catalog.ttlMs) ? (catalog.ttlMs ?? 0) : 0), MAX_CACHE_TTL_MS),
+    scope: catalog.cacheScope === "public" ? "public" : "private",
+  }
+}
+
+function quarantineDefinitions(state: State, server: string, client: MCPClient) {
+  if (state.clients[server] !== client) return false
+  const changed = server in state.defs || Object.values(state.apps).some((app) => app.server === server)
+  delete state.defs[server]
+  delete state.definitionFreshness[server]
+  state.definitionGeneration[server] = (state.definitionGeneration[server] ?? 0) + 1
+  rebuildApps(state)
+  return changed
 }
 
 export interface ServerInstructions {
@@ -193,6 +275,8 @@ export interface McpTool {
   readonly def: MCPToolDef
   readonly client: MCPClient
   readonly timeout?: number
+  /** Exact, collision-checked App binding for this server/tool pair. */
+  readonly app?: McpApp.Definition
 }
 
 export interface Interface {
@@ -254,6 +338,7 @@ const layer = Layer.effect(
     const auth = yield* McpAuth.Service
     const events = yield* EventV2Bridge.Service
     const browser = yield* McpBrowser.Service
+    const reconnectPermits = Semaphore.makeUnsafe(REMOTE_RECONNECT_CONCURRENCY)
 
     type Transport = StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport
 
@@ -505,7 +590,9 @@ const layer = Layer.effect(
         }
 
         return yield* Effect.gen(function* () {
-          const listed = mcpClient.getServerCapabilities()?.tools ? yield* McpCatalog.defs(mcpClient, mcp.timeout) : []
+          const listed = mcpClient.getServerCapabilities()?.tools
+            ? yield* McpCatalog.defs(mcpClient, mcp.timeout)
+            : { tools: [] }
           if (!listed) {
             return yield* Effect.fail(new Error("Failed to get tools"))
           }
@@ -561,12 +648,16 @@ const layer = Layer.effect(
         if (s.clients[name] !== client) return
         delete s.clients[name]
         delete s.defs[name]
-        removeApps(s, name)
+        delete s.definitionFreshness[name]
+        s.definitionGeneration[name] = (s.definitionGeneration[name] ?? 0) + 1
+        s.definitionPermits.delete(name)
+        rebuildApps(s)
         delete s.instructions[name]
         s.status[name] = { status: "failed", error: "Connection closed" }
         bridge.fork(
           Effect.logWarning("MCP connection closed", { server: name }).pipe(
             Effect.andThen(events.publish(ToolsChanged, { server: name })),
+            Effect.andThen(scheduleRemoteReconnect(s, name)),
             Effect.ignore,
           ),
         )
@@ -579,14 +670,7 @@ const layer = Layer.effect(
       if (!client.getServerCapabilities()?.tools) return
       client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
-
-        const listed = await bridge.promise(McpCatalog.defs(client, timeout))
-        if (!listed) return
-        if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
-
-        s.defs[name] = listed
-        storeApps(s, name, listed)
-        await bridge.promise(events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
+        await bridge.promise(refreshDefinitions(s, name, client, true, timeout))
       })
     }
 
@@ -608,19 +692,29 @@ const layer = Layer.effect(
       }
     }
 
-    const state = yield* InstanceState.make<State>(
+    const state: InstanceState.InstanceState<State> = yield* InstanceState.make<State>(
       Effect.fn("MCP.state")(function* () {
         const cfg = yield* cfgSvc.get()
         const bridge = yield* EffectBridge.make()
+        const scope = yield* Scope.Scope
         const config = cfg.mcp ?? {}
         const s: State = {
           config: {},
           status: {},
           clients: {},
           defs: {},
+          definitionFreshness: {},
+          definitionGeneration: {},
+          definitionPermits: new Map(),
           apps: {},
           appResources: new Map(),
           instructions: {},
+          bridge,
+          retryFibers: {},
+          retryGeneration: {},
+          connectionPermits: new Map(),
+          scope,
+          disposed: false,
         }
 
         yield* Effect.forEach(
@@ -641,23 +735,35 @@ const layer = Layer.effect(
               s.status[key] = result.status
               if (result.mcpClient) {
                 s.clients[key] = result.mcpClient
-                s.defs[key] = result.defs!
-                storeApps(s, key, result.defs!)
+                storeDefinitions(s, key, result.mcpClient, result.status, result.defs!)
                 if (result.instructions) s.instructions[key] = result.instructions
                 watch(s, key, result.mcpClient, bridge, mcp.timeout)
               }
+              if (result.status.status === "failed") yield* scheduleRemoteReconnect(s, key)
             }),
           { concurrency: "unbounded" },
         )
 
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
+            s.disposed = true
+            const retryFibers = Object.values(s.retryFibers)
+            s.retryFibers = {}
+            for (const name of Object.keys(s.retryGeneration)) {
+              s.retryGeneration[name] = (s.retryGeneration[name] ?? 0) + 1
+            }
+            yield* Effect.forEach(retryFibers, Fiber.interrupt, { concurrency: "unbounded" })
+
             const clients = Object.values(s.clients)
             s.clients = {}
             s.defs = {}
+            s.definitionFreshness = {}
+            s.definitionGeneration = {}
+            s.definitionPermits.clear()
             s.apps = {}
             s.appResources.clear()
             s.instructions = {}
+            s.connectionPermits.clear()
             yield* Effect.forEach(
               clients,
               (client) =>
@@ -683,11 +789,30 @@ const layer = Layer.effect(
       }),
     )
 
+    function connectionPermit(s: State, name: string) {
+      const existing = s.connectionPermits.get(name)
+      if (existing) return existing
+      const permit = Semaphore.makeUnsafe(1)
+      s.connectionPermits.set(name, permit)
+      return permit
+    }
+
+    function definitionPermit(s: State, name: string) {
+      const existing = s.definitionPermits.get(name)
+      if (existing) return existing
+      const permit = Semaphore.makeUnsafe(1)
+      s.definitionPermits.set(name, permit)
+      return permit
+    }
+
     function closeClient(s: State, name: string) {
       const client = s.clients[name]
       delete s.clients[name]
       delete s.defs[name]
-      removeApps(s, name)
+      delete s.definitionFreshness[name]
+      s.definitionGeneration[name] = (s.definitionGeneration[name] ?? 0) + 1
+      s.definitionPermits.delete(name)
+      rebuildApps(s)
       delete s.instructions[name]
       if (!client) return Effect.void
       return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
@@ -697,20 +822,19 @@ const layer = Layer.effect(
       s: State,
       name: string,
       client: MCPClient,
-      listed: MCPToolDef[],
+      listed: McpCatalog.ToolDefinitions,
       instructions: string | undefined,
       connected: ConnectedStatus,
       timeout?: number,
     ) {
-      const bridge = yield* EffectBridge.make()
       const previous = s.clients[name]
+      if (previous && previous !== client) s.definitionPermits.delete(name)
       s.status[name] = connected
       s.clients[name] = client
-      s.defs[name] = listed
-      storeApps(s, name, listed)
+      storeDefinitions(s, name, client, connected, listed)
       if (instructions) s.instructions[name] = instructions
       else delete s.instructions[name]
-      watch(s, name, client, bridge, timeout)
+      watch(s, name, client, s.bridge, timeout)
       if (previous) yield* Effect.tryPromise(() => previous.close()).pipe(Effect.ignore)
       return s.status[name]
     })
@@ -739,8 +863,73 @@ const layer = Layer.effect(
       return s.clients
     })
 
+    const refreshDefinitions = Effect.fnUntraced(function* (
+      s: State,
+      name: string,
+      client: MCPClient,
+      force = false,
+      timeout?: number,
+    ) {
+      const status = s.status[name]
+      if (status?.status !== "connected" || (!force && status.era !== "2026-07-28")) return
+      const freshness = s.definitionFreshness[name]
+      if (!force && freshness?.client === client && freshness.expiresAt > Date.now()) return
+      const generation = s.definitionGeneration[name] ?? 0
+
+      yield* definitionPermit(s, name).withPermits(1)(
+        Effect.gen(function* () {
+          const current = s.status[name]
+          if (
+            s.clients[name] !== client ||
+            current?.status !== "connected" ||
+            (!force && current.era !== "2026-07-28") ||
+            (s.definitionGeneration[name] ?? 0) !== generation
+          ) {
+            return
+          }
+          const latest = s.definitionFreshness[name]
+          if (!force && latest?.client === client && latest.expiresAt > Date.now()) return
+
+          const cfg = yield* cfgSvc.get()
+          const listed = yield* McpCatalog.defs(
+            client,
+            timeout ?? requestTimeout(s, name, cfg.mcp?.[name], cfg.experimental?.mcp_timeout),
+            true,
+          )
+          if (
+            s.clients[name] !== client ||
+            s.status[name]?.status !== "connected" ||
+            (s.definitionGeneration[name] ?? 0) !== generation
+          ) {
+            return
+          }
+          if (!listed) {
+            if (current.era !== "2026-07-28") return
+            const changed = quarantineDefinitions(s, name, client)
+            yield* Effect.logWarning("MCP 2026 catalog refresh failed; quarantined stale definitions", {
+              server: name,
+            })
+            if (changed) yield* events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore)
+            return
+          }
+          storeDefinitions(s, name, client, current, listed)
+          yield* events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore)
+        }),
+      )
+    })
+
+    const refreshConnectedDefinitions = Effect.fnUntraced(function* (s: State) {
+      yield* Effect.forEach(
+        Object.entries(s.clients).filter(([name]) => s.status[name]?.status === "connected"),
+        ([name, client]) => refreshDefinitions(s, name, client),
+        { concurrency: "unbounded" },
+      )
+    })
+
     const instructions = Effect.fn("MCP.instructions")(function* () {
       const s = yield* InstanceState.get(state)
+      yield* refreshConnectedDefinitions(s)
+      const collisions = collidingToolKeys(s)
       return Object.entries(s.instructions)
         .filter(([name]) => s.status[name]?.status === "connected")
         .sort(([a], [b]) => a.localeCompare(b))
@@ -749,7 +938,8 @@ const layer = Layer.effect(
           instructions: item,
           tools: (s.defs[name] ?? [])
             .filter((tool) => McpApp.visibleToModel(tool))
-            .map((tool) => McpCatalog.toolName(name, tool.name)),
+            .map((tool) => McpCatalog.toolName(name, tool.name))
+            .filter((toolKey) => !collisions.has(toolKey)),
         }))
     })
 
@@ -776,24 +966,129 @@ const layer = Layer.effect(
       )
     })
 
+    const cancelRemoteReconnect = Effect.fnUntraced(function* (s: State, name: string) {
+      s.retryGeneration[name] = (s.retryGeneration[name] ?? 0) + 1
+      const fiber = s.retryFibers[name]
+      delete s.retryFibers[name]
+      if (fiber) yield* Fiber.interrupt(fiber)
+    })
+
+    const scheduleRemoteReconnect = Effect.fnUntraced(function* (s: State, name: string) {
+      if (s.disposed || s.status[name]?.status !== "failed") return
+
+      const runtimeConfig = s.config[name]
+      const staticConfig = runtimeConfig ? undefined : (yield* cfgSvc.get()).mcp?.[name]
+      if (s.disposed || s.status[name]?.status !== "failed") return
+      const configured = runtimeConfig ?? staticConfig
+      if (
+        !configured ||
+        !isMcpConfigured(configured) ||
+        configured.type !== "remote" ||
+        configured.enabled === false ||
+        !remoteURL(configured.url)
+      ) {
+        return
+      }
+
+      yield* cancelRemoteReconnect(s, name)
+      if (s.disposed || s.status[name]?.status !== "failed") return
+      const generation = s.retryGeneration[name] ?? 0
+      const jitter = Array.from(name).reduce((total, char) => total + char.charCodeAt(0), 0) % 500
+
+      const retry = Effect.gen(function* () {
+        for (const delay of REMOTE_RECONNECT_DELAYS) {
+          yield* Effect.sleep(delay + jitter)
+          if (s.disposed || s.retryGeneration[name] !== generation || s.status[name]?.status !== "failed") return
+
+          const result = yield* reconnectPermits.withPermits(1)(
+            connectionPermit(s, name).withPermits(1)(
+              Effect.gen(function* () {
+                if (s.disposed || s.retryGeneration[name] !== generation || s.status[name]?.status !== "failed") {
+                  return undefined
+                }
+
+                const runtime = s.config[name]
+                const fromConfig = runtime ? undefined : (yield* cfgSvc.get()).mcp?.[name]
+                if (s.disposed || s.retryGeneration[name] !== generation || s.status[name]?.status !== "failed") {
+                  return undefined
+                }
+                const mcp = runtime ?? fromConfig
+                if (
+                  !mcp ||
+                  !isMcpConfigured(mcp) ||
+                  mcp.type !== "remote" ||
+                  mcp.enabled === false ||
+                  !remoteURL(mcp.url)
+                ) {
+                  return undefined
+                }
+
+                yield* Effect.logInfo("Retrying failed remote MCP connection", { server: name, delay })
+                return yield* createAndStore(name, mcp)
+              }),
+            ),
+          )
+
+          if (!result || s.disposed || s.retryGeneration[name] !== generation) return
+          if (result.status === "connected") {
+            yield* Effect.logInfo("Remote MCP connection recovered", { server: name })
+            yield* events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore)
+            return
+          }
+          // Authentication and explicit disabled states need user action and
+          // must not be converted into a background reconnect loop.
+          if (result.status !== "failed") return
+        }
+
+        yield* Effect.logWarning("Remote MCP reconnect attempts exhausted", {
+          server: name,
+          attempts: REMOTE_RECONNECT_DELAYS.length,
+        })
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (s.retryGeneration[name] === generation) delete s.retryFibers[name]
+          }),
+        ),
+      )
+
+      const fiber = yield* retry.pipe(Effect.forkIn(s.scope, { startImmediately: true }))
+      if (s.disposed || s.retryGeneration[name] !== generation) {
+        yield* Fiber.interrupt(fiber)
+        return
+      }
+      s.retryFibers[name] = fiber
+    })
+
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
       const s = yield* InstanceState.get(state)
+      yield* cancelRemoteReconnect(s, name)
       s.config[name] = mcp
-      yield* createAndStore(name, mcp)
+      const next = yield* connectionPermit(s, name).withPermits(1)(createAndStore(name, mcp))
+      if (next.status === "failed") yield* scheduleRemoteReconnect(s, name)
       return { status: s.status }
     })
 
     const connect = Effect.fn("MCP.connect")(function* (name: string) {
       const mcp = yield* requireMcpConfig(name)
-      yield* createAndStore(name, { ...mcp, enabled: true })
+      const s = yield* InstanceState.get(state)
+      yield* cancelRemoteReconnect(s, name)
+      const next = yield* connectionPermit(s, name).withPermits(1)(createAndStore(name, { ...mcp, enabled: true }))
+      if (next.status === "failed") yield* scheduleRemoteReconnect(s, name)
     })
 
     const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
       yield* requireMcpConfig(name)
       const s = yield* InstanceState.get(state)
-      yield* closeClient(s, name)
-      delete s.clients[name]
-      s.status[name] = { status: "disabled" }
+      yield* cancelRemoteReconnect(s, name)
+      yield* connectionPermit(s, name).withPermits(1)(
+        Effect.gen(function* () {
+          yield* cancelRemoteReconnect(s, name)
+          yield* closeClient(s, name)
+          delete s.clients[name]
+          s.status[name] = { status: "disabled" }
+        }),
+      )
     })
 
     function requestTimeout(s: State, name: string, configured: McpEntry | undefined, fallback?: number) {
@@ -804,10 +1099,12 @@ const layer = Layer.effect(
     const tools = Effect.fn("MCP.tools")(function* () {
       const result: Record<string, McpTool> = {}
       const s = yield* InstanceState.get(state)
+      yield* refreshConnectedDefinitions(s)
 
       const cfg = yield* cfgSvc.get()
       const config = cfg.mcp ?? {}
       const defaultTimeout = cfg.experimental?.mcp_timeout
+      const collisions = collidingToolKeys(s)
 
       for (const [clientName, client] of Object.entries(s.clients)) {
         if (s.status[clientName]?.status !== "connected") continue
@@ -820,14 +1117,20 @@ const layer = Layer.effect(
         const timeout = requestTimeout(s, clientName, mcpConfig, defaultTimeout)
         for (const def of listed) {
           if (!McpApp.visibleToModel(def)) continue
-          result[McpCatalog.toolName(clientName, def.name)] = { def, client, timeout }
+          const toolKey = McpCatalog.toolName(clientName, def.name)
+          if (collisions.has(toolKey)) continue
+          const app = s.apps[toolKey]
+          const binding = app?.server === clientName && app.tool === def.name ? app : undefined
+          result[toolKey] = { def, client, timeout, ...(binding ? { app: binding } : {}) }
         }
       }
       return result
     })
 
     const apps = Effect.fn("MCP.apps")(function* () {
-      return { ...(yield* InstanceState.get(state)).apps }
+      const s = yield* InstanceState.get(state)
+      yield* refreshConnectedDefinitions(s)
+      return { ...s.apps }
     })
 
     const appResource = Effect.fn("MCP.appResource")(function* (
@@ -836,23 +1139,33 @@ const layer = Layer.effect(
       force = false,
     ) {
       const s = yield* InstanceState.get(state)
+      const client = s.clients[server]
+      if (!client) return undefined
+      yield* refreshDefinitions(s, server, client)
       if (!Object.values(s.apps).some((app) => app.server === server && app.meta.resourceUri === resourceUri)) {
         return undefined
       }
       const key = `${server}\u0000${resourceUri}`
       const cached = s.appResources.get(key)
-      if (!force && cached && cached.expiresAt > Date.now()) return cached.value
+      const directory = yield* InstanceState.directory
+      if (
+        !force &&
+        cached &&
+        cached.client === client &&
+        cached.expiresAt > Date.now() &&
+        (cached.scope === "public" || cached.directory === directory)
+      ) {
+        return cached.value
+      }
 
-      const result = yield* readResource(server, resourceUri)
+      const result = yield* readResourceWithCacheMode(server, resourceUri, force ? "refresh" : "use")
       const content = result?.contents.find(
-        (item) =>
-          "text" in item &&
-          (item.mimeType === "text/html;profile=mcp-app" || item.mimeType === "text/html"),
+        (item) => item.uri === resourceUri && item.mimeType === MCP_APP_MIME_TYPE,
       )
-      if (!content || !("text" in content)) return undefined
-      const bytes = McpApp.resourceBytes(content.text)
-      if (!bytes) {
-        yield* Effect.logWarning("MCP App resource exceeds the HTML size limit", {
+      if (!content) return undefined
+      const decoded = McpApp.resourceContent(content)
+      if (!decoded) {
+        yield* Effect.logWarning("MCP App resource has invalid or oversized content", {
           server,
           resourceUri,
           maxBytes: McpApp.MAX_RESOURCE_BYTES,
@@ -862,12 +1175,24 @@ const layer = Layer.effect(
       const value: McpApp.Resource = {
         server,
         resourceUri,
-        mimeType: content.mimeType ?? "text/html;profile=mcp-app",
-        html: content.text,
-        sha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+        mimeType: MCP_APP_MIME_TYPE,
+        html: decoded.html,
+        sha256: new Bun.CryptoHasher("sha256").update(decoded.bytes).digest("hex"),
         meta: McpApp.resourceMeta(content._meta),
       }
-      s.appResources.set(key, { value, expiresAt: Date.now() + 5 * 60_000 })
+      const hints = McpCatalog.cacheHints(result)
+      const status = s.status[server]
+      const modern = status?.status === "connected" && status.era === "2026-07-28"
+      const ttlMs = modern
+        ? Math.min(Math.max(0, Number.isFinite(hints.ttlMs) ? (hints.ttlMs ?? 0) : 0), MAX_CACHE_TTL_MS)
+        : 5 * 60_000
+      s.appResources.set(key, {
+        value,
+        expiresAt: Date.now() + ttlMs,
+        scope: modern && hints.cacheScope === "public" ? "public" : "private",
+        client,
+        directory,
+      })
       return value
     })
 
@@ -878,6 +1203,9 @@ const layer = Layer.effect(
       args: Record<string, unknown>,
     ) {
       const s = yield* InstanceState.get(state)
+      const client = s.clients[server]
+      if (!client) return undefined
+      yield* refreshDefinitions(s, server, client)
       const app = Object.values(s.apps).find(
         (item) => item.server === server && item.meta.resourceUri === resourceUri,
       )
@@ -899,8 +1227,6 @@ const layer = Layer.effect(
       ) {
         return undefined
       }
-      const client = s.clients[server]
-      if (!client) return undefined
       const cfg = yield* cfgSvc.get()
       return yield* Effect.tryPromise(() =>
         client.callTool(
@@ -1015,6 +1341,25 @@ const layer = Layer.effect(
       )
     })
 
+    const readResourceWithCacheMode = Effect.fnUntraced(function* (
+      clientName: string,
+      resourceUri: string,
+      cacheMode: "use" | "refresh" | "bypass",
+    ) {
+      return yield* withClient(
+        clientName,
+        (client, timeout) => {
+          const read = client.readResource as unknown as (
+            params: { uri: string },
+            options?: { timeout?: number; cacheMode?: "use" | "refresh" | "bypass" },
+          ) => ReturnType<MCPClient["readResource"]>
+          return read.call(client, { uri: resourceUri }, { timeout, cacheMode })
+        },
+        "readResource",
+        { resourceUri },
+      )
+    })
+
     const getMcpConfig = Effect.fnUntraced(function* (mcpName: string) {
       const s = yield* InstanceState.get(state)
       if (s.config[mcpName]) return s.config[mcpName]
@@ -1111,7 +1456,7 @@ const layer = Layer.effect(
         const listed = client
           ? client.getServerCapabilities()?.tools
             ? yield* McpCatalog.defs(client, mcpConfig.timeout)
-            : []
+            : { tools: [] }
           : undefined
         if (!client || !listed) {
           yield* Effect.tryPromise(() => client?.close() ?? Promise.resolve()).pipe(Effect.ignore)

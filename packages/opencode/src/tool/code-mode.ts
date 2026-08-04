@@ -19,7 +19,12 @@ export const Parameters = Schema.Struct({
   }),
 })
 
-type CallEntry = { tool: string; status: "running" | "completed" | "error"; input?: Record<string, unknown> }
+type CallEntry = {
+  tool: string
+  status: "running" | "completed" | "error"
+  input?: Record<string, unknown>
+  result?: CallToolResult
+}
 
 type Metadata = {
   toolCalls: CallEntry[]
@@ -158,13 +163,6 @@ const invokeChildTool = Effect.fn("CodeMode.invokeChildTool")(function* (input: 
           onprogress: () => {},
         },
       )
-      if (raw.isError)
-        throw new Error(
-          raw.content
-            .flatMap((item) => (item.type === "text" ? [item.text] : []))
-            .filter((text) => text.trim())
-            .join("\n\n") || "MCP tool returned an error",
-        )
       return raw
     })
   }).pipe(
@@ -219,6 +217,7 @@ export const CodeModeTool = Tool.define(
         let childCalls = 0
         const callTool = (entry: CatalogEntry) => (input: unknown) =>
           Effect.gen(function* () {
+            const index = childCalls
             childCalls += 1
             const result = yield* invokeChildTool({
               plugin,
@@ -227,7 +226,14 @@ export const CodeModeTool = Tool.define(
               callID: `${ctx.callID ?? entry.key}/${childCalls}`,
               ctx,
             })
-            return projectMcpResult(result, (attachment: Attachment) => void attachments.push(attachment))
+            const projected = projectMcpResult(result, (attachment: Attachment) => void attachments.push(attachment))
+            if (!result.isError) return projected
+            const current = calls[index]
+            if (current) calls[index] = { ...current, result }
+            yield* publish()
+            return yield* Effect.fail(
+              toolError(McpCatalog.toolResultErrorMessage(result), new McpCatalog.ToolResultError(result)),
+            )
           }).pipe(
             Effect.catchCause((cause) => {
               if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt

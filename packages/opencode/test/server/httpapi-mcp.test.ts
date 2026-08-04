@@ -240,8 +240,10 @@ describe("mcp HttpApi", () => {
         const binding = {
           sessionID: "ses_01J5Y5H0AH4Q4NXJ6P4C3P5V2K",
           messageID: "msg_01J5Y5H0AH4Q4NXJ6P4C3P5V2K",
+          partID: "prt_01J5Y5H0AH4Q4NXJ6P4C3P5V2K",
           server: "demo",
           resourceUri: "ui://demo/dashboard",
+          toolKey: "demo_open_dashboard",
         }
         const query = new URLSearchParams(binding).toString()
         const resource = yield* request(handler, `${McpPaths.appResource}?${query}`, tmp.directory)
@@ -250,10 +252,30 @@ describe("mcp HttpApi", () => {
           error: "MCP App resource is not bound to this session message",
         })
 
+        const legacyToolCall = yield* request(handler, McpPaths.appToolCall, tmp.directory, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            sessionID: binding.sessionID,
+            messageID: binding.messageID,
+            server: binding.server,
+            resourceUri: binding.resourceUri,
+            name: "refresh",
+            arguments: {},
+          }),
+        })
+        expect(legacyToolCall.status).toBe(400)
+
         const toolCall = yield* request(handler, McpPaths.appToolCall, tmp.directory, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ ...binding, name: "refresh", arguments: {} }),
+          body: JSON.stringify({
+            ...binding,
+            partID: "prt_01J5Y5H0AH4Q4NXJ6P4C3P5V2K",
+            toolKey: "demo_open_dashboard",
+            name: "refresh",
+            arguments: {},
+          }),
         })
         expect(toolCall.status).toBe(403)
         expect(yield* json(toolCall)).toEqual({
@@ -264,12 +286,12 @@ describe("mcp HttpApi", () => {
   )
 
   it.instance(
-    "requires the session, message, server, resource, and app-visible tool binding",
+    "requires the exact completed ToolPart, origin tool key, and app-visible target binding",
     () =>
       Effect.gen(function* () {
         const tmp = yield* TestInstance
         const handler = HttpApiApp.webHandler()
-        const binding = yield* provideInstanceEffect(tmp.directory)(
+        const seeded = yield* provideInstanceEffect(tmp.directory)(
           Effect.gen(function* () {
             const sessions = yield* Session.Service
             const info = yield* sessions.create({})
@@ -282,8 +304,23 @@ describe("mcp HttpApi", () => {
               agent: "test",
               model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
             })
+            const partID = PartID.ascending()
+            const runningPartID = PartID.ascending()
+            const sameResourcePartID = PartID.ascending()
+            const metadata = {
+              mcpApp: {
+                server: "demo",
+                tool: "open_dashboard",
+                toolKey: "demo_open_dashboard",
+                resourceUri: "ui://openchamber/test-dashboard",
+                meta: {
+                  resourceUri: "ui://openchamber/test-dashboard",
+                  visibility: ["model", "app"],
+                },
+              },
+            }
             yield* sessions.updatePart({
-              id: PartID.ascending(),
+              id: partID,
               sessionID: info.id,
               messageID,
               type: "tool",
@@ -294,23 +331,87 @@ describe("mcp HttpApi", () => {
                 input: {},
                 output: "opened",
                 title: "Open dashboard",
+                metadata,
+                time: { start: Date.now(), end: Date.now() },
+              },
+            })
+            yield* sessions.updatePart({
+              id: runningPartID,
+              sessionID: info.id,
+              messageID,
+              type: "tool",
+              tool: "demo_open_dashboard",
+              callID: "call-running-mcp-app",
+              state: {
+                status: "running",
+                input: {},
+                title: "Open dashboard",
+                metadata,
+                time: { start: Date.now() },
+              },
+            })
+            yield* sessions.updatePart({
+              id: sameResourcePartID,
+              sessionID: info.id,
+              messageID,
+              type: "tool",
+              tool: "demo_other_dashboard",
+              callID: "call-same-resource-other-tool",
+              state: {
+                status: "completed",
+                input: {},
+                output: "opened elsewhere",
+                title: "Open other dashboard",
                 metadata: {
                   mcpApp: {
-                    server: "demo",
-                    resourceUri: "ui://openchamber/test-dashboard",
+                    ...metadata.mcpApp,
+                    tool: "other_dashboard",
+                    toolKey: "demo_other_dashboard",
                   },
                 },
                 time: { start: Date.now(), end: Date.now() },
               },
             })
             return {
-              sessionID: info.id,
-              messageID,
-              server: "demo",
-              resourceUri: "ui://openchamber/test-dashboard",
+              binding: {
+                sessionID: info.id,
+                messageID,
+                partID,
+                server: "demo",
+                resourceUri: "ui://openchamber/test-dashboard",
+                toolKey: "demo_open_dashboard",
+              },
+              runningPartID,
+              sameResourcePartID,
             }
           }),
         )
+        const binding = seeded.binding
+
+        const acceptedResource = yield* request(
+          handler,
+          `${McpPaths.appResource}?${new URLSearchParams(binding).toString()}`,
+          tmp.directory,
+        )
+        expect(acceptedResource.status).toBe(200)
+
+        for (const changed of [
+          { sessionID: SessionID.make("ses_01J5Y5H0AH4Q4NXJ6P4C3P5V2K") },
+          { messageID: MessageID.ascending() },
+          { partID: PartID.ascending() },
+          { partID: seeded.runningPartID },
+          { partID: seeded.sameResourcePartID },
+          { server: "other-server" },
+          { resourceUri: "ui://openchamber/other-dashboard" },
+          { toolKey: "demo_refresh_dashboard" },
+        ]) {
+          const response = yield* request(
+            handler,
+            `${McpPaths.appResource}?${new URLSearchParams({ ...binding, ...changed }).toString()}`,
+            tmp.directory,
+          )
+          expect(response.status).toBe(403)
+        }
 
         const accepted = yield* request(handler, McpPaths.appToolCall, tmp.directory, {
           method: "POST",
@@ -318,19 +419,28 @@ describe("mcp HttpApi", () => {
           body: JSON.stringify({ ...binding, name: "refresh_dashboard", arguments: {} }),
         })
         expect(accepted.status).toBe(200)
+        const acceptedResult = yield* json<Record<string, unknown>>(accepted)
+        expect(acceptedResult).toMatchObject({
+          content: [{ type: "text", text: "refreshed" }],
+        })
+        expect(acceptedResult.data).toBeUndefined()
 
         const ambiguousUnboundHelper = yield* request(handler, McpPaths.appToolCall, tmp.directory, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ ...binding, name: "ambiguous_app_helper", arguments: {} }),
         })
-        expect(ambiguousUnboundHelper.status).toBe(404)
+        expect(ambiguousUnboundHelper.status).toBe(403)
 
         for (const changed of [
           { sessionID: SessionID.make("ses_01J5Y5H0AH4Q4NXJ6P4C3P5V2K") },
           { messageID: MessageID.ascending() },
+          { partID: PartID.ascending() },
+          { partID: seeded.runningPartID },
+          { partID: seeded.sameResourcePartID },
           { server: "other-server" },
           { resourceUri: "ui://openchamber/other-dashboard" },
+          { toolKey: "demo_refresh_dashboard" },
         ]) {
           const response = yield* request(handler, McpPaths.appToolCall, tmp.directory, {
             method: "POST",
@@ -350,7 +460,14 @@ describe("mcp HttpApi", () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ ...binding, name: "missing_tool", arguments: {} }),
         })
-        expect(wrongTool.status).toBe(404)
+        expect(wrongTool.status).toBe(403)
+
+        const modelOnlyTool = yield* request(handler, McpPaths.appToolCall, tmp.directory, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ...binding, name: "model_only_status", arguments: {} }),
+        })
+        expect(modelOnlyTool.status).toBe(403)
       }),
     {
       config: {

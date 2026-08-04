@@ -48,6 +48,21 @@ describe("McpCatalog.convertTool", () => {
       content: [{ type: "text", text: JSON.stringify(structuredContent) }],
     })
   })
+
+  test("reports isError to the model without discarding the validated MCP result", async () => {
+    const result = {
+      isError: true,
+      content: [{ type: "text" as const, text: "write was rejected" }],
+      structuredContent: { revision: 7, accepted: false },
+      _meta: { trace: "trace-safe" },
+    }
+    const converted = McpCatalog.convertTool(mcpTool(), clientReturning(result))
+
+    const error = await converted.execute!({}, options).catch((cause: unknown) => cause)
+
+    expect(error).toBeInstanceOf(McpCatalog.ToolResultError)
+    expect(error).toMatchObject({ message: "write was rejected", result })
+  })
 })
 
 test("preserves output schema validation across paginated tool discovery", async () => {
@@ -69,6 +84,8 @@ test("preserves output schema validation across paginated tool discovery", async
             ],
           }
         : {
+            ttlMs: 1_234,
+            cacheScope: "private" as const,
             tools: [
               {
                 name: "first",
@@ -97,7 +114,9 @@ test("preserves output schema validation across paginated tool discovery", async
 
   try {
     const tools = await Effect.runPromise(McpCatalog.defs(client))
-    expect(tools?.map((tool) => tool.name)).toEqual(["first", "second"])
+    expect(tools?.tools.map((tool) => tool.name)).toEqual(["first", "second"])
+    expect(tools?.ttlMs).toBe(1_234)
+    expect(tools?.cacheScope).toBe("private")
     await expect(client.callTool({ name: "first", arguments: {} })).rejects.toThrow(
       "Structured content does not match the tool's output schema",
     )

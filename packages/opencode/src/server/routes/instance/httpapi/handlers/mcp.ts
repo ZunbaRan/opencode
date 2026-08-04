@@ -1,4 +1,5 @@
 import { MCP } from "@/mcp"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Effect, Schema } from "effect"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
@@ -113,7 +114,9 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
     const appResource = Effect.fn("McpHttpApi.appResource")(function* (ctx: {
       query: typeof AppResourceQuery.Type
     }) {
-      if (!(yield* hasBinding(session, ctx.query))) {
+      const part = yield* boundToolPart(session, ctx.query)
+      const origin = (yield* mcp.apps())[ctx.query.toolKey]
+      if (!part || !origin || !matchesOrigin(origin, part, ctx.query)) {
         return yield* new McpAppBindingError({ error: "MCP App resource is not bound to this session message" })
       }
       const resource = yield* mcp.appResource(ctx.query.server, ctx.query.resourceUri, ctx.query.force)
@@ -124,7 +127,9 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
     const appToolCall = Effect.fn("McpHttpApi.appToolCall")(function* (ctx: {
       payload: typeof AppToolCallPayload.Type
     }) {
-      if (!(yield* hasBinding(session, ctx.payload))) {
+      const part = yield* boundToolPart(session, ctx.payload)
+      const origin = (yield* mcp.apps())[ctx.payload.toolKey]
+      if (!part || !origin || !matchesOrigin(origin, part, ctx.payload)) {
         return yield* new McpAppBindingError({ error: "MCP App tool call is not bound to this session message" })
       }
       const result = yield* mcp.appToolCall(
@@ -133,7 +138,9 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
         ctx.payload.name,
         ctx.payload.arguments ?? {},
       )
-      if (!result) return yield* new McpAppNotFoundError({ error: "MCP App tool was not found or is not app-visible" })
+      if (!result) {
+        return yield* new McpAppBindingError({ error: "MCP App tool is not bound or app-visible for this resource" })
+      }
       return result
     })
 
@@ -152,24 +159,47 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
   }),
 )
 
-function hasBinding(
+function boundToolPart(
   session: Session.Interface,
-  input: Pick<typeof AppToolCallPayload.Type, "sessionID" | "messageID" | "server" | "resourceUri">,
+  input: typeof AppResourceQuery.Type | typeof AppToolCallPayload.Type,
 ) {
   return session
-    .findMessage(input.sessionID, (message) => {
-      if (message.info.id !== input.messageID) return false
-      return message.parts.some((part) => {
-        if (part.type !== "tool" || part.state.status !== "completed") return false
-        const metadata = record(part.state.metadata)
-        const app = record(metadata?.mcpApp)
-        return app?.server === input.server && app?.resourceUri === input.resourceUri
-      })
+    .getPart({
+      sessionID: input.sessionID,
+      messageID: input.messageID,
+      partID: input.partID,
     })
     .pipe(
-      Effect.map((message) => message._tag === "Some"),
-      Effect.orElseSucceed(() => false),
+      Effect.map((part) => {
+        if (part?.type !== "tool" || part.state.status !== "completed") return
+        return part
+      }),
     )
+}
+
+function matchesOrigin(
+  origin: NonNullable<MCP.McpTool["app"]>,
+  part: SessionV1.ToolPart,
+  input: typeof AppResourceQuery.Type | typeof AppToolCallPayload.Type,
+) {
+  if (part.state.status !== "completed") return false
+  const metadata = record(part.state.metadata)
+  const app = record(metadata?.mcpApp)
+  const meta = record(app?.meta)
+  return (
+    part.sessionID === input.sessionID &&
+    part.messageID === input.messageID &&
+    part.id === input.partID &&
+    part.tool === input.toolKey &&
+    app?.server === input.server &&
+    app.resourceUri === input.resourceUri &&
+    app.toolKey === input.toolKey &&
+    app.tool === origin.tool &&
+    meta?.resourceUri === input.resourceUri &&
+    origin.server === input.server &&
+    origin.toolKey === input.toolKey &&
+    origin.meta.resourceUri === input.resourceUri
+  )
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
