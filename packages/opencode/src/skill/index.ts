@@ -17,6 +17,11 @@ import { Glob } from "@opencode-ai/core/util/glob"
 import { Discovery } from "./discovery"
 import { isRecord } from "@/util/record"
 import { escapeHtml } from "@/util/html"
+import {
+  GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY,
+  GENERATIVE_WIDGET_GUIDELINES_SKILL_DESCRIPTION,
+  GENERATIVE_WIDGET_GUIDELINES_SKILL_NAME,
+} from "./generative-widget-guidelines"
 
 const CLAUDE_EXTERNAL_DIR = ".claude"
 const AGENTS_EXTERNAL_DIR = ".agents"
@@ -280,6 +285,14 @@ const layer = Layer.effect(
           description: CUSTOMIZE_OPENCODE_SKILL_DESCRIPTION,
           location: "<built-in>",
           content: CUSTOMIZE_OPENCODE_SKILL_BODY,
+        }
+        // OpenChamber Generative Widget design modules (on-demand ~2–4k tokens).
+        // Always-on wire format lives in session/prompt/generative-widget.txt.
+        s.skills[GENERATIVE_WIDGET_GUIDELINES_SKILL_NAME] = {
+          name: GENERATIVE_WIDGET_GUIDELINES_SKILL_NAME,
+          description: GENERATIVE_WIDGET_GUIDELINES_SKILL_DESCRIPTION,
+          location: "<built-in>",
+          content: GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY,
         }
         yield* loadSkills(s, yield* InstanceState.get(discovered), events)
         return s

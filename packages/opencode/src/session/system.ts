@@ -13,6 +13,7 @@ import PROMPT_META from "./prompt/meta.txt"
 
 import PROMPT_CODEX from "./prompt/codex.txt"
 import PROMPT_TRINITY from "./prompt/trinity.txt"
+import PROMPT_GENERATIVE_WIDGET from "./prompt/generative-widget.txt"
 import type { Provider } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
@@ -92,6 +93,9 @@ const layer = Layer.effect(
                   ]),
                 "</available_references>",
               ].join("\n"),
+          // Always-on generative widget wire format (~350 tokens). Full design
+          // modules load on demand via skill generative-widget-guidelines.
+          PROMPT_GENERATIVE_WIDGET,
         ].filter((part): part is string => part !== undefined)
       }),
 
