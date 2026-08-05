@@ -4,6 +4,12 @@
 - The default branch in this repo is `dev`.
 - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
 
+## Upstream Synchronization Policy
+
+- This fork incorporates upstream changes by default only after an official stable Release is published.
+- Use the immutable stable Release tag/ref as the upstream merge source. Do not routinely merge moving upstream branches such as `dev`, `main`, or `beta`, and ignore unreleased commits until the next stable Release.
+- The only exception is an explicit user request naming the commit, tag, or ref to incorporate.
+
 ## Branch Names
 
 Use a short branch name of at most three words, separated by hyphens. Do not use slashes or type prefixes such as `feat/` or `fix/`.
