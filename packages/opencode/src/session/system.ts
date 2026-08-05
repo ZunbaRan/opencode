@@ -50,6 +50,54 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
 
+interface EnvironmentModel {
+  providerID: string
+  api: { id: string }
+}
+
+interface EnvironmentContext {
+  directory: string
+  worktree: string
+  project: { vcs?: string }
+}
+
+export function environment(model: EnvironmentModel, ctx: EnvironmentContext, references: Reference.Info[]) {
+  return [
+    [
+      `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
+      `Here is some useful information about the environment you are running in:`,
+      `<env>`,
+      `  Working directory: ${ctx.directory}`,
+      `  Workspace root folder: ${ctx.worktree}`,
+      `  Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`,
+      `  Platform: ${process.platform}`,
+      `  Today's date: ${new Date().toDateString()}`,
+      `</env>`,
+    ].join("\n"),
+    references.length === 0
+      ? undefined
+      : [
+          "Project references provide additional directories that can be accessed when relevant.",
+          "<available_references>",
+          ...references
+            .toSorted((a, b) => a.name.localeCompare(b.name))
+            .flatMap((reference) => [
+              "  <reference>",
+              `    <name>${reference.name}</name>`,
+              `    <path>${reference.path}</path>`,
+              ...(reference.description === undefined
+                ? []
+                : [`    <description>${reference.description}</description>`]),
+              "  </reference>",
+            ]),
+          "</available_references>",
+        ].join("\n"),
+    // Always-on generative widget wire format (~350 tokens). Full design
+    // modules load on demand via skill generative-widget-guidelines.
+    PROMPT_GENERATIVE_WIDGET,
+  ].filter((part): part is string => part !== undefined)
+}
+
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -63,40 +111,7 @@ const layer = Layer.effect(
         const references = yield* Effect.gen(function* () {
           return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
-        return [
-          [
-            `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
-            `Here is some useful information about the environment you are running in:`,
-            `<env>`,
-            `  Working directory: ${ctx.directory}`,
-            `  Workspace root folder: ${ctx.worktree}`,
-            `  Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`,
-            `  Platform: ${process.platform}`,
-            `  Today's date: ${new Date().toDateString()}`,
-            `</env>`,
-          ].join("\n"),
-          references.length === 0
-            ? undefined
-            : [
-                "Project references provide additional directories that can be accessed when relevant.",
-                "<available_references>",
-                ...references
-                  .toSorted((a, b) => a.name.localeCompare(b.name))
-                  .flatMap((reference) => [
-                    "  <reference>",
-                    `    <name>${reference.name}</name>`,
-                    `    <path>${reference.path}</path>`,
-                    ...(reference.description === undefined
-                      ? []
-                      : [`    <description>${reference.description}</description>`]),
-                    "  </reference>",
-                  ]),
-                "</available_references>",
-              ].join("\n"),
-          // Always-on generative widget wire format (~350 tokens). Full design
-          // modules load on demand via skill generative-widget-guidelines.
-          PROMPT_GENERATIVE_WIDGET,
-        ].filter((part): part is string => part !== undefined)
+        return environment(model, ctx, references)
       }),
 
       skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info) {

@@ -7,6 +7,7 @@ import { Skill } from "../../src/skill"
 import { Permission } from "../../src/permission"
 import type { Provider } from "../../src/provider/provider"
 import { SystemPrompt } from "../../src/session/system"
+import PROMPT_GENERATIVE_WIDGET from "../../src/session/prompt/generative-widget.txt"
 import { MCP } from "../../src/mcp"
 import { testEffect } from "../lib/effect"
 
@@ -88,6 +89,23 @@ describe("session.system", () => {
     expect(SystemPrompt.provider({ api: { id: "meta/muse-spark-preview" } } as Provider.Model)[0]).toContain(
       "Meta Muse Spark",
     )
+  })
+
+  test("always includes the Generative Widget wire-format prompt", () => {
+    const environment = SystemPrompt.environment(
+      {
+        providerID: "openchamber",
+        api: { id: "generative-widget-test" },
+      },
+      {
+        directory: "/workspace/project",
+        worktree: "/workspace/project",
+        project: { vcs: "git" },
+      },
+      [],
+    )
+
+    expect(environment.filter((part) => part === PROMPT_GENERATIVE_WIDGET)).toHaveLength(1)
   })
 
   it.effect("skills output is sorted by name and stable across calls", () =>

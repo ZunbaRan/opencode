@@ -1,9 +1,17 @@
 #!/usr/bin/env bun
 
 import { $ } from "bun"
+import { spawnSync } from "node:child_process"
+import fs from "node:fs"
+import os from "node:os"
 import path from "path"
 import { fileURLToPath } from "url"
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
+import PROMPT_GENERATIVE_WIDGET from "../src/session/prompt/generative-widget.txt"
+import {
+  GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY,
+  GENERATIVE_WIDGET_GUIDELINES_SKILL_NAME,
+} from "../src/skill/generative-widget-guidelines"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -25,6 +33,75 @@ const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
 const distribution = process.env.OPENCODE_DISTRIBUTION ?? "anomalyco/opencode"
 const upstreamCommit = process.env.OPENCODE_UPSTREAM_COMMIT ?? "unknown"
 const forkCommit = process.env.OPENCODE_FORK_COMMIT ?? "unknown"
+
+const sha256 = (value: string) => new Bun.CryptoHasher("sha256").update(value).digest("hex")
+
+const verifyGenerativeWidgetAssets = (binaryPath: string) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-widget-assets-"))
+  const config = path.join(root, "opencode-config")
+  const xdgConfig = path.join(root, "xdg-config")
+  const xdgData = path.join(root, "xdg-data")
+  const xdgState = path.join(root, "xdg-state")
+  const xdgCache = path.join(root, "xdg-cache")
+
+  try {
+    for (const directory of [config, xdgConfig, xdgData, xdgState, xdgCache]) {
+      fs.mkdirSync(directory, { recursive: true })
+    }
+
+    const result = spawnSync(path.resolve(binaryPath), ["--pure", "debug", "generative-widget"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        HOME: root,
+        USERPROFILE: root,
+        OPENCODE_TEST_HOME: root,
+        OPENCODE_CONFIG_DIR: config,
+        OPENCODE_CONFIG_CONTENT: "{}",
+        OPENCODE_DISABLE_AUTOUPDATE: "1",
+        OPENCODE_DISABLE_AUTOCOMPACT: "1",
+        OPENCODE_DISABLE_CLAUDE_CODE: "1",
+        OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
+        OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
+        OPENCODE_DISABLE_MODELS_FETCH: "1",
+        OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+        XDG_CONFIG_HOME: xdgConfig,
+        XDG_DATA_HOME: xdgData,
+        XDG_STATE_HOME: xdgState,
+        XDG_CACHE_HOME: xdgCache,
+      },
+    })
+
+    if (result.status !== 0) {
+      throw new Error(
+        `Generative Widget asset self-check failed for ${binaryPath}: ${result.error?.message ?? result.stderr.trim()}`,
+      )
+    }
+
+    const manifest: unknown = JSON.parse(result.stdout.trim())
+    if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) {
+      throw new Error(`Generative Widget asset self-check returned an invalid manifest for ${binaryPath}`)
+    }
+    const expected = {
+      schema: "com.openchamber.generative-widget-assets.v1",
+      promptSha256: sha256(PROMPT_GENERATIVE_WIDGET),
+      skill: GENERATIVE_WIDGET_GUIDELINES_SKILL_NAME,
+      skillSha256: sha256(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY),
+    }
+    for (const [key, value] of Object.entries(expected)) {
+      if (Reflect.get(manifest, key) !== value) {
+        throw new Error(`Generative Widget asset self-check mismatch for ${binaryPath}: ${key}`)
+      }
+    }
+    console.log(`Generative Widget assets verified: ${binaryPath}`)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
 
 const createEmbeddedWebUIBundle = async () => {
   console.log(`Building Web UI to embed in the binary`)
@@ -215,6 +292,7 @@ for (const item of targets) {
     try {
       const versionOutput = await $`${binaryPath} --version`.text()
       console.log(`Smoke test passed: ${versionOutput.trim()}`)
+      verifyGenerativeWidgetAssets(binaryPath)
     } catch (e) {
       console.error(`Smoke test failed for ${name}:`, e)
       process.exit(1)

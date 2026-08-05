@@ -2,6 +2,10 @@ import { describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer } from "effect"
 import { Skill } from "../../src/skill"
+import {
+  GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY,
+  GENERATIVE_WIDGET_GUIDELINES_SKILL_NAME,
+} from "../../src/skill/generative-widget-guidelines"
 import { Discovery } from "../../src/skill/discovery"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
@@ -64,6 +68,22 @@ const withHome = <A, E, R>(home: string, self: Effect.Effect<A, E, R>) =>
   )
 
 describe("skill", () => {
+  itWithoutExternalSkills.live("ships the built-in Generative Widget guidelines", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const skill = yield* Skill.Service
+        const guidelines = yield* skill.require(GENERATIVE_WIDGET_GUIDELINES_SKILL_NAME)
+
+        expect(guidelines).toEqual({
+          name: GENERATIVE_WIDGET_GUIDELINES_SKILL_NAME,
+          description: expect.stringContaining("show-widget"),
+          location: "<built-in>",
+          content: GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY,
+        })
+      }),
+    ),
+  )
+
   it.effect("formats verbose locations as XML-safe filesystem paths", () =>
     Effect.sync(() => {
       const output = Skill.fmt(
