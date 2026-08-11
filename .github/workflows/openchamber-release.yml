@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Fork version, for example 1.18.9-oc.1"
+        description: "Fork version, for example 1.18.16-oc.1"
         required: true
         type: string
       prerelease:
@@ -29,6 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       upstream: ${{ steps.revisions.outputs.upstream }}
+      upstream_ref: ${{ steps.revisions.outputs.upstream_ref }}
       fork: ${{ steps.revisions.outputs.fork }}
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +38,8 @@ jobs:
           fetch-depth: 0
       - name: Validate version and resolve revisions
         id: revisions
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [[ ! "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-oc\.[0-9]+$ ]]; then
             echo "version must match <upstream-version>-oc.<revision>" >&2
@@ -47,14 +50,21 @@ jobs:
             echo "fork version must extend the checked-out upstream version ${upstream_version}" >&2
             exit 1
           fi
+          upstream_tag="v${upstream_version}"
+          stable_tag="$(gh api "repos/anomalyco/opencode/releases/tags/${upstream_tag}" --jq 'select(.draft == false and .prerelease == false) | .tag_name')"
+          if [[ "$stable_tag" != "$upstream_tag" ]]; then
+            echo "${upstream_tag} must be an official non-draft, non-prerelease OpenCode Release" >&2
+            exit 1
+          fi
           git remote add upstream https://github.com/anomalyco/opencode.git
-          git fetch upstream dev
-          upstream_commit="$(git rev-parse upstream/dev)"
+          git fetch upstream "refs/tags/${upstream_tag}:refs/tags/${upstream_tag}"
+          upstream_commit="$(git rev-list -n 1 "$upstream_tag")"
           if ! git merge-base --is-ancestor "$upstream_commit" HEAD; then
-            echo "openchamber-apps must merge the latest upstream/dev before release" >&2
+            echo "openchamber-apps must merge official stable Release ${upstream_tag} before release" >&2
             exit 1
           fi
           echo "upstream=$upstream_commit" >> "$GITHUB_OUTPUT"
+          echo "upstream_ref=$upstream_tag" >> "$GITHUB_OUTPUT"
           echo "fork=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   build:
@@ -88,7 +98,7 @@ jobs:
         run: |
           tag="v${{ inputs.version }}"
           title="OpenCode ${{ inputs.version }} for OpenChamber"
-          notes="OpenChamber-managed OpenCode fork. Upstream dev: ${{ needs.validate-version.outputs.upstream }}. Fork: ${{ needs.validate-version.outputs.fork }}."
+          notes="OpenChamber-managed OpenCode fork. Upstream Release: ${{ needs.validate-version.outputs.upstream_ref }} (${{ needs.validate-version.outputs.upstream }}). Fork: ${{ needs.validate-version.outputs.fork }}."
           if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release edit "$tag" \
               --repo "${{ github.repository }}" \
@@ -142,6 +152,7 @@ jobs:
       - name: Create checksums and provenance
         env:
           RELEASE_VERSION: ${{ inputs.version }}
+          UPSTREAM_REF: ${{ needs.validate-version.outputs.upstream_ref }}
           UPSTREAM_COMMIT: ${{ needs.validate-version.outputs.upstream }}
           FORK_COMMIT: ${{ needs.validate-version.outputs.fork }}
         run: bun run script/openchamber-provenance.ts

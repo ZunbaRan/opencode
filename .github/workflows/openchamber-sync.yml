@@ -1,9 +1,12 @@
-name: sync upstream dev
+name: sync upstream stable release
 
 on:
-  schedule:
-    - cron: "17 3 * * 1"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Official stable OpenCode Release tag, for example v1.18.16"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -24,13 +27,26 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-      - name: Merge upstream/dev
+      - name: Validate and merge official stable Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
+          release_tag="$RELEASE_TAG"
+          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release_tag must match v<major>.<minor>.<patch>" >&2
+            exit 1
+          fi
+          stable_tag="$(gh api "repos/anomalyco/opencode/releases/tags/${release_tag}" --jq 'select(.draft == false and .prerelease == false) | .tag_name')"
+          if [[ "$stable_tag" != "$release_tag" ]]; then
+            echo "${release_tag} must be an official non-draft, non-prerelease OpenCode Release" >&2
+            exit 1
+          fi
           git config user.name "OpenChamber Sync"
           git config user.email "actions@users.noreply.github.com"
           git remote add upstream https://github.com/anomalyco/opencode.git
-          git fetch upstream dev
-          git merge --no-edit --no-ff upstream/dev
+          git fetch upstream "refs/tags/${release_tag}:refs/tags/${release_tag}"
+          git merge --no-edit --no-ff "$release_tag"
       - run: bun install --frozen-lockfile
       - name: Fork gates
         run: |

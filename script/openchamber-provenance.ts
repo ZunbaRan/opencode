@@ -4,9 +4,11 @@ import path from "node:path"
 
 const dir = path.resolve("packages/opencode/dist")
 const version = process.env.RELEASE_VERSION
+const upstreamRef = process.env.UPSTREAM_REF
 const upstreamCommit = process.env.UPSTREAM_COMMIT
 const forkCommit = process.env.FORK_COMMIT
-if (!version || !upstreamCommit || !forkCommit) throw new Error("release provenance environment is incomplete")
+if (!version || !upstreamRef || !upstreamCommit || !forkCommit)
+  throw new Error("release provenance environment is incomplete")
 
 const files = (await Array.fromAsync(new Bun.Glob("*.{zip,gz,tgz}").scan({ cwd: dir }))).sort()
 const entries = []
@@ -27,7 +29,7 @@ await Bun.write(
       schema: "com.openchamber.opencode.provenance.v1",
       distribution: "ZunbaRan/opencode",
       version,
-      upstream: { repository: "anomalyco/opencode", branch: "dev", commit: upstreamCommit },
+      upstream: { repository: "anomalyco/opencode", releaseTag: upstreamRef, commit: upstreamCommit },
       fork: { repository: "ZunbaRan/opencode", branch: "openchamber-apps", commit: forkCommit },
       files: entries,
       generatedAt: new Date().toISOString(),
@@ -36,4 +38,3 @@ await Bun.write(
     2,
   ),
 )
-
