@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer } from "effect"
 import { Skill } from "../../src/skill"
@@ -83,6 +83,82 @@ describe("skill", () => {
       }),
     ),
   )
+
+  describe("generative widget guidelines semantics", () => {
+    test("keeps the exact show-widget JSON fence wire format", () => {
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("```show-widget")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toMatch(/```show-widget\s*\n\{"widget_code":/)
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain('"title"')
+    })
+
+    test("states the visual selection hierarchy across the four tracks", () => {
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("installed specialized Tool/View")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("Declarative interactive_ui")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("show-widget for small free-form")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("html_artifact for complex custom")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("four-track numbering")
+    })
+
+    test("allows multiple different-focus visuals with narrative bridges", () => {
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("1-N visuals")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("genuinely different focuses")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("preserve generation order")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain(
+        "before the first visual, after the last, and between visuals",
+      )
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("narrative bridges")
+    })
+
+    test("sets one primary visual per focus with a soft four-visual limit", () => {
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("one primary visual per focus")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("no more than four primary visuals in one answer")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("strong user need")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("no runtime counter or gate")
+    })
+
+    test("forbids same-business-data repetition across tracks", () => {
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain(
+        "Never repeat the same business data or same conclusion",
+      )
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("text for explanation or a different-focus visual")
+    })
+
+    test("requires labeling example/simulated/generated data", () => {
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("Label example/simulated/generated data clearly")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("governed by its Tool authority")
+    })
+
+    test("keeps short answers as prose without mandatory widgets", () => {
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("remain prose")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("Do not require a widget")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("show-widget is not a Tool")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain(
+        "Do not force a visual merely because the capability exists",
+      )
+    })
+
+    test("preserves streaming, safety, and design guidance", () => {
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("window.__widgetSendMessage")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("No fetch/XHR/WebSocket")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("sandboxed iframe")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("CDN allowlist")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("<defs>")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("visual elements immediately")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("No font-size below 11px")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).toContain("No dark/colored backgrounds on outer containers")
+    })
+
+    test("rejects one-per-answer and stop-after-first absolutes", () => {
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).not.toContain("The ONLY way")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).not.toContain("non-negotiable")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).not.toContain("exactly one widget")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).not.toContain("exactly one visual")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).not.toContain("one primary View for the entire answer")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).not.toContain("stop after the first visual")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).not.toContain("exactly one sentence")
+      expect(GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY).not.toContain("must always include a widget")
+    })
+  })
 
   it.effect("formats verbose locations as XML-safe filesystem paths", () =>
     Effect.sync(() => {

@@ -7,12 +7,12 @@ export const GENERATIVE_WIDGET_GUIDELINES_SKILL_NAME = "generative-widget-guidel
 export const GENERATIVE_WIDGET_GUIDELINES_SKILL_DESCRIPTION =
   "Load detailed design guidelines for OpenChamber Generative Widgets (show-widget fences). Use BEFORE creating non-trivial visualizations: diagrams, flowcharts, timelines, Chart.js charts, interactive calculators, mockups, or multi-widget narratives. Keywords: visualization, diagram, chart, flowchart, timeline, widget, show-widget, dashboard."
 
-export const GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY = `## FINAL OUTPUT FORMAT — non-negotiable
+export const GENERATIVE_WIDGET_GUIDELINES_SKILL_BODY = `## Wire format
 
-The ONLY way to render a widget is a code fence labelled \`show-widget\` whose body is a JSON object with a \`widget_code\` string:
+A show-widget visual is rendered by a code fence labelled \`show-widget\` whose body is a JSON object with string fields \`widget_code\` and \`title\`:
 
 \`\`\`show-widget
-{"title":"<human-readable title>","widget_code":"<escaped HTML/SVG string>"}
+{"widget_code":"<escaped HTML/SVG string>","title":"<human-readable title>"}
 \`\`\`
 
 - Prefer single-quote HTML attributes inside widget_code.
@@ -21,11 +21,28 @@ The ONLY way to render a widget is a code fence labelled \`show-widget\` whose b
 
 Minimal example:
 \`\`\`show-widget
-{"title":"Hello","widget_code":"<div style='padding:8px;font:14px var(--font-sans)'>Hello world</div>"}
+{"widget_code":"<div style='padding:8px;font:14px var(--font-sans)'>Hello world</div>","title":"Hello"}
 \`\`\`
 
 
 > **Reading this document:** HTML/SVG/Chart.js snippets below are INTERNAL EXAMPLES for inside \`widget_code\`. Only the show-widget JSON fence is the wire format.
+
+
+## Visual selection hierarchy
+1. Prefer an installed specialized Tool/View for its unique connected or installed capability.
+2. Otherwise prefer Declarative interactive_ui for compact structured charts/diagrams/tables when available.
+3. Use show-widget for small free-form conversational HTML/CSS/SVG visualizations and streaming narrative widgets.
+4. Use html_artifact for complex custom canvas/document/simulation artifacts.
+MCP Apps remain outside this four-track numbering.
+
+## Conversational interleaving
+- Emit 1-N visuals for genuinely different focuses; preserve generation order.
+- Short prose may appear before the first visual, after the last, and between visuals as narrative bridges.
+- Use one primary visual per focus.
+- Soft target/max: normally no more than four primary visuals in one answer; exceeding it requires strong user need. This is instruction text only — no runtime counter or gate.
+- Never repeat the same business data or same conclusion across show-widget, Declarative, installed business Tool/View, and html_artifact. If one track already represents that data, use text for explanation or a different-focus visual.
+- Label example/simulated/generated data clearly. Installed connected-business data remains governed by its Tool authority.
+- Short factual answers and ordinary prose remain prose. Do not require a widget; show-widget is not a Tool. Do not force a visual merely because the capability exists.
 
 
 ## Core Design System
@@ -45,6 +62,7 @@ Minimal example:
 ### Rules
 - No comments, no emoji, no position:fixed, no iframes
 - No font-size below 11px
+- No fetch/XHR/WebSocket — sandboxed iframe, no network APIs
 - No dark/colored backgrounds on outer containers
 - Typography: weights 400/500 only, sentence case
 - No DOCTYPE/html/head/body
@@ -187,13 +205,13 @@ Two parallel groups. Matching rows. Different fill colors per group. Optional co
 - Clickable nodes: \\\`onclick="window.__widgetSendMessage('...')"\\\` on 2-3 key nodes
 
 ### Multi-widget narratives
-For complex topics, output multiple widgets of DIFFERENT types:
+For complex topics, emit multiple visuals for genuinely different focuses — one primary visual per focus, normally no more than four primary visuals in one answer (exceed only with strong user need). Preserve generation order and bridge with short prose:
 1. Overview SVG (e.g. hierarchy)
-2. Text explaining one part
+2. Short prose bridge explaining one part
 3. Detail SVG (e.g. cycle diagram for that part)
 4. Text with quantitative insight
 5. Interactive Chart.js with controls
-Mix types freely.
+Mix types freely, never repeating the same business data or conclusion across visuals or tracks.
 
 
 ## Module map
@@ -203,4 +221,4 @@ Mix types freely.
 - **art** — SVG illustration
 - **diagram** — flowcharts, timelines, hierarchies, cycles
 
-When continuing after this skill, emit only valid \`show-widget\` JSON fences for visuals.`
+When continuing after this skill, emit valid \`show-widget\` JSON fences for any show-widget visuals you produce.`

@@ -108,6 +108,75 @@ describe("session.system", () => {
     expect(environment.filter((part) => part === PROMPT_GENERATIVE_WIDGET)).toHaveLength(1)
   })
 
+  describe("generative widget prompt semantics", () => {
+    test("keeps the exact show-widget JSON fence wire format", () => {
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("```show-widget")
+      expect(PROMPT_GENERATIVE_WIDGET).toMatch(/```show-widget\s*\n\{"widget_code":/)
+      expect(PROMPT_GENERATIVE_WIDGET).toContain('"title"')
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("widget_code is a JSON string")
+    })
+
+    test("preserves sandbox, streaming, and drill-down contracts", () => {
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("sandboxed iframe")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("no network APIs")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("Streaming order: SVG defs first")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("window.__widgetSendMessage")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("Transparent background")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("min-height not fixed height")
+    })
+
+    test("states the visual selection hierarchy across the four tracks", () => {
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("installed specialized Tool/View")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("Declarative interactive_ui")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("show-widget for small free-form")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("html_artifact for complex custom")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("four-track numbering")
+    })
+
+    test("allows multiple different-focus visuals with bridge prose in order", () => {
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("1-N visuals")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("genuinely different focuses")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("preserve generation order")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("before the first visual, after the last, and between visuals")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("narrative bridges")
+    })
+
+    test("sets one primary visual per focus with a soft four-visual limit", () => {
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("one primary visual per focus")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("no more than four primary visuals in one answer")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("strong user need")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("guidance, not a hard gate")
+    })
+
+    test("forbids same-business-data repetition across tracks", () => {
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("Never repeat the same business data or same conclusion")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("text for explanation or a different-focus visual")
+    })
+
+    test("requires labeling example/simulated/generated data", () => {
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("Label example/simulated/generated data clearly")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("governed by its Tool authority")
+    })
+
+    test("keeps short factual answers as prose without mandatory widgets", () => {
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("remain prose")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("Do not require a widget")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("show-widget is not a Tool")
+      expect(PROMPT_GENERATIVE_WIDGET).toContain("Do not force a visual merely because the capability exists")
+    })
+
+    test("rejects one-per-answer and stop-after-first absolutes", () => {
+      expect(PROMPT_GENERATIVE_WIDGET).not.toContain("The ONLY way")
+      expect(PROMPT_GENERATIVE_WIDGET).not.toContain("non-negotiable")
+      expect(PROMPT_GENERATIVE_WIDGET).not.toContain("exactly one widget")
+      expect(PROMPT_GENERATIVE_WIDGET).not.toContain("exactly one visual")
+      expect(PROMPT_GENERATIVE_WIDGET).not.toContain("one primary View for the entire answer")
+      expect(PROMPT_GENERATIVE_WIDGET).not.toContain("stop after the first visual")
+      expect(PROMPT_GENERATIVE_WIDGET).not.toContain("exactly one sentence")
+      expect(PROMPT_GENERATIVE_WIDGET).not.toContain("must always include a widget")
+    })
+  })
+
   it.effect("skills output is sorted by name and stable across calls", () =>
     Effect.gen(function* () {
       const prompt = yield* SystemPrompt.Service

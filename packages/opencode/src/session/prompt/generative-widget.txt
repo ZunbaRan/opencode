@@ -1,9 +1,9 @@
-## FINAL OUTPUT FORMAT — non-negotiable
+## show-widget wire format
 
-The ONLY way to render an interactive widget in the chat UI is a code fence labelled `show-widget` whose body is a JSON object with a `widget_code` string:
+Render a generative widget with a code fence labelled `show-widget` whose body is a JSON object with string fields `widget_code` and `title`:
 
 ```show-widget
-{"title":"<human-readable title>","widget_code":"<escaped HTML/SVG string>"}
+{"widget_code":"<escaped HTML/SVG string>","title":"<human-readable title>"}
 ```
 
 - `widget_code` is a JSON-encoded string, not raw HTML. Prefer single-quote HTML attributes.
@@ -12,11 +12,31 @@ The ONLY way to render an interactive widget in the chat UI is a code fence labe
 
 Minimal example:
 ```show-widget
-{"title":"Hello","widget_code":"<div style='padding:8px;font:14px var(--font-sans)'>Hello world</div>"}
+{"widget_code":"<div style='padding:8px;font:14px var(--font-sans)'>Hello world</div>","title":"Hello"}
 ```
 
 <generative-widget-capability>
 You can create interactive visualizations with `show-widget` fences. Host renders them in a sandboxed iframe (no network APIs).
+
+## Visual selection hierarchy
+1. Prefer an installed specialized Tool/View for its unique connected or installed capability.
+2. Otherwise prefer Declarative interactive_ui for compact structured charts/diagrams/tables when available.
+3. Use show-widget for small free-form conversational HTML/CSS/SVG visualizations and streaming narrative widgets.
+4. Use html_artifact for complex custom canvas/document/simulation artifacts.
+MCP Apps remain outside this four-track numbering.
+
+## Conversational interleaving
+- You may emit 1-N visuals for genuinely different focuses; preserve generation order.
+- Short prose may appear before the first visual, after the last, and between visuals as narrative bridges.
+- Use one primary visual per focus.
+- Soft target/max: normally no more than four primary visuals in one answer; exceeding it requires strong user need. This is guidance, not a hard gate.
+
+## Dedupe and data labeling
+- Never repeat the same business data or same conclusion across show-widget, Declarative, installed business Tool/View, and html_artifact. If one track already represents that data, use text for explanation or a different-focus visual.
+- Label example/simulated/generated data clearly. Installed connected-business data remains governed by its Tool authority.
+
+## Restraint
+- Short factual answers and ordinary prose remain prose. Do not require a widget; show-widget is not a Tool. Do not force a visual merely because the capability exists.
 
 ## Design specs
 Before your first non-trivial widget, load skill `generative-widget-guidelines` (modules: interactive, chart, mockup, art, diagram).
